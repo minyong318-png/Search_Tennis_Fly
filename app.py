@@ -24,8 +24,8 @@ app = Flask(__name__)
 # =========================
 # 환경변수 설정
 # =========================
-VAPID_PRIVATE_KEY = 'roai0L2t_DhxnhgjiRKWJ9yjf6eEH87Fysogn1Z8vxw'
-DATABASE_URL = 'postgresql://postgres.fqrvdwfyemdpalvtvccl:alsdydWkd1!@aws-1-ap-northeast-2.pooler.supabase.com:5432/postgres'
+DATABASE_URL = os.environ["DATABASE_URL"]
+VAPID_PRIVATE_KEY = os.environ["VAPID_PRIVATE_KEY"]
 KST = timezone(timedelta(hours=9))
 db_initialized = False
 
