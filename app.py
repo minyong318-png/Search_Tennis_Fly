@@ -183,27 +183,6 @@ def data():
 @app.route("/refresh")
 def refresh():
     print("[INFO] refresh start")
-    now_kst = datetime.now(KST)
-    with get_db() as conn:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("SELECT last_refresh_at FROM refresh_state WHERE id = 1")
-            row = cur.fetchone()
-            last_refresh_at = row["last_refresh_at"]
-
-            if not is_critical_window_kst(now_kst):
-                if last_refresh_at:
-                    elapsed = now_kst - last_refresh_at
-                    if elapsed < MIN_REFRESH_INTERVAL:
-                        print(f"[REFRESH] skip (elapsed={elapsed})")
-                        return "skip", 200
-
-            # 실행 허용 → 시각 갱신
-            cur.execute("""
-                UPDATE refresh_state
-                SET last_refresh_at = %s
-                WHERE id = 1
-            """, (now_kst,))
-            conn.commit()
 
     with get_db() as conn:
         with conn.cursor() as cur:
