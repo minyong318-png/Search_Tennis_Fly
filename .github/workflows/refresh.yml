@@ -1,0 +1,22 @@
+name: Tennis Refresh Scheduler
+
+on:
+  schedule:
+    # 🔹 기본: 10분마다 (하루 종일)
+    - cron: "*/10 * * * *"
+
+    # 🔥 한국시간 23:50 ~ 23:59 → UTC 14:50 ~ 14:59 (1분마다)
+    - cron: "50-59 14 * * *"
+
+    # 🔥 한국시간 24:00 → UTC 15:00
+    - cron: "0 15 * * *"
+
+  workflow_dispatch:
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call refresh endpoint
+        run: |
+          curl -fsS https://search-tennis.fly.dev/refresh

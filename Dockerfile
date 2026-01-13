@@ -1,18 +1,19 @@
 # syntax=docker/dockerfile:1
 
-ARG PYTHON_VERSION=3.11.9
+FROM python:3.11-slim
 
-FROM python:${PYTHON_VERSION}-slim
+WORKDIR /app
 
-LABEL fly_launch_runtime="flask"
+RUN apt-get update && apt-get install -y \
+    gcc \
+    libpq-dev \
+ && rm -rf /var/lib/apt/lists/*
 
-WORKDIR /code
-
-COPY requirements.txt requirements.txt
-RUN pip3 install -r requirements.txt
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
 EXPOSE 8080
 
-CMD [ "python3", "-m" , "flask", "run", "--host=0.0.0.0", "--port=8080"]
+CMD ["gunicorn", "app:app", "--bind", "0.0.0.0:8080", "--workers", "1", "--timeout", "60"]
