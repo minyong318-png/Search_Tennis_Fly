@@ -35,6 +35,10 @@ on:
         description: "랜덤 시드(동일 시설 샘플 고정). 비우면 랜덤"
         required: false
         default: "1234"
+      loop:
+        description: "55초 동안 반복 실행(true/false)"
+        required: true
+        default: "false"
 
 jobs:
   bench:
@@ -86,6 +90,8 @@ jobs:
           REPEAT: ${{ inputs.repeat }}
           SHUFFLE: ${{ inputs.shuffle }}
           SEED: ${{ inputs.seed }}
+          LOOP: ${{ inputs.loop }}
+
         run: |
           echo "Runner info:"
           uname -a
@@ -111,4 +117,5 @@ jobs:
             --timeout ${TIMEOUT} \
             --repeat ${REPEAT} \
             ${SEED_ARG} \
-            $( [ "${SHUFFLE}" = "true" ] && echo "--shuffle" )
+            $( [ "${SHUFFLE}" = "true" ] && echo "--shuffle" ) \
+            $( [ "${LOOP}" = "true" ] && echo "--loop" )

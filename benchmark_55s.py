@@ -48,7 +48,9 @@ async def run_timeboxed(
     concurrency: int,
     per_request_timeout_s: float,
     shuffle: bool,
-) -> Dict:
+    loop: bool,   # 추가
+    ) -> Dict:
+
     """
     55초(기본) 동안 가능한 한 많은 (rid, dateVal) 조합을 처리.
     여기서 "크롤링 1개" = fetch_times(POST) 1회로 카운팅.
@@ -89,7 +91,12 @@ async def run_timeboxed(
                 try:
                     rid, dv = q.get_nowait()
                 except asyncio.QueueEmpty:
-                    return
+                    if not loop:
+                        return
+                    # loop 모드면 jobs를 다시 큐에 채우고 계속 실행
+                    for j in jobs:
+                        q.put_nowait(j)
+                    continue
 
                 # 남은 시간이 너무 없으면 시작하지 않음(마지막 타임아웃 방지)
                 if time.perf_counter() + 0.3 >= deadline:
@@ -139,6 +146,7 @@ async def run_timeboxed(
         "p95_s": round(percentile(durations, 95), 3) if durations else 0.0,
         "rids": len(rids),
         "datevals": len(datevals),
+        "loop": loop,
     }
 
 
@@ -159,6 +167,7 @@ def parse_args():
     p.add_argument("--shuffle", action="store_true")
     p.add_argument("--repeat", type=int, default=3)
     p.add_argument("--seed", type=int, default=None, help="랜덤 시드(시설 샘플 고정)")
+    p.add_argument("--loop", action="store_true", help="55초 끝날 때까지 jobs를 반복해서 최대 처리량 측정")
 
     return p.parse_args()
 
@@ -182,6 +191,7 @@ async def main():
             concurrency=args.concurrency,
             per_request_timeout_s=args.timeout,
             shuffle=args.shuffle,
+            loop=args.loop,
         )
         res["run"] = i + 1
         runs.append(res)
@@ -199,6 +209,7 @@ async def main():
         "completed_min": min(completed),
         "completed_max": max(completed),
         "p95_s_avg": round(statistics.mean(p95), 3),
+        
     }
     print("SUMMARY:", json.dumps(summary, ensure_ascii=False))
 
