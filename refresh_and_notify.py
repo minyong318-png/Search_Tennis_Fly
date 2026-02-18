@@ -281,6 +281,9 @@ def main():
     _ = os.environ.get("VAPID_PUBLIC_KEY", "")  # optional for server-side sending
     _ = os.environ["VAPID_PRIVATE_KEY"]
     _ = os.environ["VAPID_SUBJECT"]
+    snapshot_rows = []  # (facility_id, date_ymd, slot_key, ts, ts)
+    sent_rows = []      # (user_id, facility_id, date_ymd, slot_key, ts)
+    ts_now = utcnow()
 
     with psycopg.connect(database_url) as conn:
         ensure_schema(conn)
@@ -327,8 +330,9 @@ def main():
                 # ✅ 첫 실행(스냅샷 없음): baseline만 저장하고 알림 스킵
                 if not old_slots:
                     if new_slots:
-                        upsert_snapshot(conn, fid, d, new_slots)
-                        old_map[key] = set(new_slots)  # 메모리도 갱신
+                        for sk in new_slots:
+                            snapshot_rows.append((fid, d, sk, ts_now, ts_now))
+                    old_map[key] = set(new_slots)
                     continue
 
                 added = new_slots - old_slots
@@ -336,8 +340,9 @@ def main():
                 # 변화 없음: snapshot만 갱신(기본은 upsert로 last_seen 갱신)
                 if not added:
                     if new_slots:
-                        upsert_snapshot(conn, fid, d, new_slots)
-                        old_map[key] = set(new_slots)
+                        for sk in new_slots:
+                            snapshot_rows.append((fid, d, sk, ts_now, ts_now))
+                    old_map[key] = set(new_slots)
                     continue
 
                 # ✅ added가 있을 때만 구독자 매칭
@@ -345,8 +350,10 @@ def main():
                 if not users:
                     # 구독자가 없으면 스냅샷만 갱신
                     if new_slots:
-                        upsert_snapshot(conn, fid, d, new_slots)
-                        old_map[key] = set(new_slots)
+                        for sk in new_slots:
+                            snapshot_rows.append((fid, d, sk, ts_now, ts_now))
+                    old_map[key] = set(new_slots)
+
                     continue
 
                 total_added_pairs += 1
@@ -380,10 +387,37 @@ def main():
 
                 # 스냅샷 갱신(새 슬롯 포함)
                 if new_slots:
-                    upsert_snapshot(conn, fid, d, new_slots)
-                    old_map[key] = set(new_slots)
-
+                    for sk in new_slots:
+                        snapshot_rows.append((fid, d, sk, ts_now, ts_now))
+                old_map[key] = set(new_slots)
                 print(f"[DIFF] {fid} {date_key} old={len(old_slots)} new={len(new_slots)} added={len(added)} users={len(users)}")
+        # --- flush snapshots (bulk upsert) ---
+        if snapshot_rows:
+            with conn.cursor() as cur:
+                cur.executemany(
+                    """
+                    insert into slots_snapshot (facility_id, date_ymd, slot_key, first_seen_at, last_seen_at)
+                    values (%s, %s, %s, %s, %s)
+                    on conflict (facility_id, date_ymd, slot_key)
+                    do update set last_seen_at = excluded.last_seen_at
+                    """,
+                    snapshot_rows
+                )
+
+        # --- flush sent_log (bulk insert) ---
+        if sent_rows:
+            with conn.cursor() as cur:
+                cur.executemany(
+                    """
+                    insert into sent_log (user_id, facility_id, date_ymd, slot_key, sent_at)
+                    values (%s, %s, %s, %s, %s)
+                    on conflict (user_id, facility_id, date_ymd, slot_key)
+                    do nothing
+                    """,
+                    sent_rows
+                )
+
+        conn.commit()
 
         print(f"[SUMMARY] added_pairs={total_added_pairs} added_slots={total_added_slots} push_requests={total_push_requests}")
 
