@@ -1,267 +1,345 @@
 import os
 import json
-import hashlib
 from datetime import datetime, date
-from typing import Dict, List, Set, Tuple
+from typing import Dict, List, Set, Tuple, Optional, Iterable
 
 import psycopg
+from psycopg.rows import tuple_row
 from pywebpush import webpush, WebPushException
 
 import tennis_core
 
 
-def now_utc():
+# -------------------------
+# Utils
+# -------------------------
+def utcnow() -> datetime:
     return datetime.utcnow()
 
 
-def ensure_schema(conn: psycopg.Connection):
-    with conn.cursor() as cur:
-        cur.execute("""
-        create table if not exists push_endpoints (
-          user_id text primary key,
-          endpoint text not null,
-          p256dh text not null,
-          auth text not null,
-          updated_at timestamptz not null default now()
-        );
-        """)
-        cur.execute("""
-        create table if not exists subscriptions (
-          id bigserial primary key,
-          user_id text not null,
-          facility_id text not null,
-          facility_name text,
-          date_ymd date not null,
-          enabled boolean not null default true,
-          created_at timestamptz not null default now()
-        );
-        """)
-        cur.execute("""
-        create index if not exists idx_subscriptions_fac_date
-          on subscriptions (facility_id, date_ymd)
-          where enabled = true;
-        """)
-
-        cur.execute("""
-        create table if not exists slots_snapshot (
-          facility_id text not null,
-          date_ymd date not null,
-          slot_key text not null,
-          first_seen_at timestamptz not null default now(),
-          last_seen_at timestamptz not null default now(),
-          primary key (facility_id, date_ymd, slot_key)
-        );
-        """)
-        cur.execute("""
-        create index if not exists idx_slots_snapshot_fac_date
-          on slots_snapshot (facility_id, date_ymd);
-        """)
-
-        cur.execute("""
-        create table if not exists sent_log (
-          user_id text not null,
-          facility_id text not null,
-          date_ymd date not null,
-          slot_key text not null,
-          sent_at timestamptz not null default now(),
-          primary key (user_id, facility_id, date_ymd, slot_key)
-        );
-        """)
-    conn.commit()
-
-
-def ymd_to_key(d: date) -> str:
-    return d.strftime("%Y%m%d")
+def ymd_str_to_date(yyyymmdd: str) -> date:
+    return date(int(yyyymmdd[0:4]), int(yyyymmdd[4:6]), int(yyyymmdd[6:8]))
 
 
 def slot_key_from_time(t: str) -> str:
-    # tennis_core.py의 시간 문자열을 그대로 키로 사용(코트 구분이 있다면 여기서 합치면 됨)
+    # 코트 구분이 있으면 "HH:MM|court2" 같은 형태로 바꾸면 됨
     return t.strip()
 
 
-def get_needed_targets(conn) -> List[Tuple[str, date, str]]:
-    """
-    반환: (facility_id, date_ymd, facility_name)
-    """
+# -------------------------
+# DB schema (minimal)
+# -------------------------
+SCHEMA_SQL = """
+create table if not exists push_endpoints (
+  user_id text primary key,
+  endpoint text not null,
+  p256dh text not null,
+  auth text not null,
+  updated_at timestamptz not null default now()
+);
+
+create table if not exists subscriptions (
+  id bigserial primary key,
+  user_id text not null,
+  facility_id text not null,
+  date_ymd date not null,
+  enabled boolean not null default true,
+  created_at timestamptz not null default now()
+);
+
+create index if not exists idx_subscriptions_fac_date
+  on subscriptions (facility_id, date_ymd)
+  where enabled = true;
+
+create table if not exists slots_snapshot (
+  facility_id text not null,
+  date_ymd date not null,
+  slot_key text not null,
+  first_seen_at timestamptz not null default now(),
+  last_seen_at timestamptz not null default now(),
+  primary key (facility_id, date_ymd, slot_key)
+);
+
+create index if not exists idx_slots_snapshot_fac_date
+  on slots_snapshot (facility_id, date_ymd);
+
+create table if not exists sent_log (
+  user_id text not null,
+  facility_id text not null,
+  date_ymd date not null,
+  slot_key text not null,
+  sent_at timestamptz not null default now(),
+  primary key (user_id, facility_id, date_ymd, slot_key)
+);
+"""
+
+
+def ensure_schema(conn: psycopg.Connection) -> None:
     with conn.cursor() as cur:
+        cur.execute(SCHEMA_SQL)
+    conn.commit()
+
+
+# -------------------------
+# Load data from DB (batch)
+# -------------------------
+def load_all_endpoints(conn: psycopg.Connection) -> Dict[str, dict]:
+    """
+    returns: user_id -> subscription_info dict for pywebpush
+    """
+    with conn.cursor(row_factory=tuple_row) as cur:
+        cur.execute("select user_id, endpoint, p256dh, auth from push_endpoints")
+        rows = cur.fetchall()
+
+    m = {}
+    for user_id, endpoint, p256dh, auth in rows:
+        m[user_id] = {"endpoint": endpoint, "keys": {"p256dh": p256dh, "auth": auth}}
+    return m
+
+
+def load_all_subscriptions(conn: psycopg.Connection) -> Dict[Tuple[str, date], List[str]]:
+    """
+    returns: (facility_id, date_ymd) -> [user_id...]
+    """
+    with conn.cursor(row_factory=tuple_row) as cur:
         cur.execute("""
-          select facility_id, date_ymd, coalesce(facility_name,'')
-          from subscriptions
-          where enabled = true
+            select facility_id, date_ymd, user_id
+            from subscriptions
+            where enabled = true
         """)
         rows = cur.fetchall()
-    return [(r[0], r[1], r[2]) for r in rows]
+
+    m: Dict[Tuple[str, date], List[str]] = {}
+    for facility_id, date_ymd, user_id in rows:
+        key = (str(facility_id), date_ymd)
+        m.setdefault(key, []).append(user_id)
+    return m
 
 
-def load_old_slots(conn, facility_id: str, date_ymd: date) -> Set[str]:
-    with conn.cursor() as cur:
+def load_snapshot_map(
+    conn: psycopg.Connection,
+    facility_ids: List[str],
+    date_list: List[date],
+) -> Dict[Tuple[str, date], Set[str]]:
+    """
+    returns: (facility_id, date_ymd) -> set(slot_key)
+    batch로 전부 읽어와 메모리에서 diff
+    """
+    if not facility_ids or not date_list:
+        return {}
+
+    with conn.cursor(row_factory=tuple_row) as cur:
         cur.execute("""
-          select slot_key
-          from slots_snapshot
-          where facility_id = %s and date_ymd = %s
-        """, (facility_id, date_ymd))
-        return {r[0] for r in cur.fetchall()}
+            select facility_id, date_ymd, slot_key
+            from slots_snapshot
+            where facility_id = any(%s) and date_ymd = any(%s)
+        """, (facility_ids, date_list))
+        rows = cur.fetchall()
+
+    m: Dict[Tuple[str, date], Set[str]] = {}
+    for facility_id, date_ymd, slot_key in rows:
+        key = (str(facility_id), date_ymd)
+        m.setdefault(key, set()).add(slot_key)
+    return m
 
 
-def upsert_snapshot(conn, facility_id: str, date_ymd: date, new_slots: Set[str]):
-    ts = now_utc()
+def upsert_snapshot(conn: psycopg.Connection, facility_id: str, date_ymd: date, slots: Set[str]) -> None:
+    ts = utcnow()
+    if not slots:
+        # 슬롯이 없는 날도 last_seen을 남기고 싶으면 별도 테이블로 관리하는 편이 낫다.
+        return
+
     with conn.cursor() as cur:
-        for sk in new_slots:
+        for sk in slots:
             cur.execute("""
-              insert into slots_snapshot (facility_id, date_ymd, slot_key, first_seen_at, last_seen_at)
-              values (%s, %s, %s, %s, %s)
-              on conflict (facility_id, date_ymd, slot_key)
-              do update set last_seen_at = excluded.last_seen_at
+                insert into slots_snapshot (facility_id, date_ymd, slot_key, first_seen_at, last_seen_at)
+                values (%s, %s, %s, %s, %s)
+                on conflict (facility_id, date_ymd, slot_key)
+                do update set last_seen_at = excluded.last_seen_at
             """, (facility_id, date_ymd, sk, ts, ts))
     conn.commit()
 
 
-def filter_unsent(conn, user_id: str, facility_id: str, date_ymd: date, added: Set[str]) -> List[str]:
-    if not added:
-        return []
-    added_list = list(added)
-    with conn.cursor() as cur:
+def load_already_sent(conn: psycopg.Connection, user_id: str, facility_id: str, date_ymd: date, slot_keys: List[str]) -> Set[str]:
+    if not slot_keys:
+        return set()
+    with conn.cursor(row_factory=tuple_row) as cur:
         cur.execute("""
-          select slot_key
-          from sent_log
-          where user_id = %s and facility_id = %s and date_ymd = %s and slot_key = any(%s)
-        """, (user_id, facility_id, date_ymd, added_list))
-        sent = {r[0] for r in cur.fetchall()}
-    return [sk for sk in added_list if sk not in sent]
+            select slot_key
+            from sent_log
+            where user_id = %s and facility_id = %s and date_ymd = %s and slot_key = any(%s)
+        """, (user_id, facility_id, date_ymd, slot_keys))
+        rows = cur.fetchall()
+    return {r[0] for r in rows}
 
 
-def mark_sent(conn, user_id: str, facility_id: str, date_ymd: date, slot_keys: List[str]):
+def mark_sent(conn: psycopg.Connection, user_id: str, facility_id: str, date_ymd: date, slot_keys: List[str]) -> None:
     if not slot_keys:
         return
-    ts = now_utc()
+    ts = utcnow()
     with conn.cursor() as cur:
         for sk in slot_keys:
             cur.execute("""
-              insert into sent_log (user_id, facility_id, date_ymd, slot_key, sent_at)
-              values (%s, %s, %s, %s, %s)
-              on conflict (user_id, facility_id, date_ymd, slot_key) do nothing
+                insert into sent_log (user_id, facility_id, date_ymd, slot_key, sent_at)
+                values (%s, %s, %s, %s, %s)
+                on conflict (user_id, facility_id, date_ymd, slot_key) do nothing
             """, (user_id, facility_id, date_ymd, sk, ts))
     conn.commit()
 
 
-def get_push_endpoint(conn, user_id: str):
-    with conn.cursor() as cur:
-        cur.execute("""
-          select endpoint, p256dh, auth
-          from push_endpoints
-          where user_id = %s
-        """, (user_id,))
-        row = cur.fetchone()
-    if not row:
-        return None
-    endpoint, p256dh, auth = row
-    return {"endpoint": endpoint, "keys": {"p256dh": p256dh, "auth": auth}}
-
-
-def get_subscribers(conn, facility_id: str, date_ymd: date) -> List[str]:
-    with conn.cursor() as cur:
-        cur.execute("""
-          select distinct user_id
-          from subscriptions
-          where enabled = true and facility_id = %s and date_ymd = %s
-        """, (facility_id, date_ymd))
-        return [r[0] for r in cur.fetchall()]
-
-
-def send_push(subscription: dict, title: str, body: str):
-    vapid_public = os.environ["VAPID_PUBLIC_KEY"]
+# -------------------------
+# Push
+# -------------------------
+def send_push(subscription_info: dict, title: str, body: str) -> None:
     vapid_private = os.environ["VAPID_PRIVATE_KEY"]
     vapid_subject = os.environ["VAPID_SUBJECT"]
 
     payload = json.dumps({"title": title, "body": body}, ensure_ascii=False)
-
-    return webpush(
-        subscription_info=subscription,
+    webpush(
+        subscription_info=subscription_info,
         data=payload,
         vapid_private_key=vapid_private,
         vapid_claims={"sub": vapid_subject},
     )
 
 
+# -------------------------
+# Crawl adapter (repo dependent)
+# -------------------------
+def crawl_all() -> Tuple[Dict[str, str], Dict[str, Dict[str, List[str]]]]:
+    """
+    Search_Tennis_Fly의 tennis_core.run_all()을 기준으로 작성.
+    기대 형태:
+      facilities: { rid(str): "시설명" }
+      availability: { rid(str): { "YYYYMMDD": [ "HH:MM", ... ] } }
+    """
+    res = tennis_core.run_all()
+
+    # run_all()이 (facilities, availability) 튜플이면 그대로
+    if isinstance(res, tuple) and len(res) == 2:
+        facilities, availability = res
+        return facilities, availability
+
+    # 혹시 dict로 한 번에 주는 형태면 여기에서 맞춰주기
+    # (필요하면 너 run_all 형태 알려주면 더 정확히 맞춰줄게)
+    raise RuntimeError("tennis_core.run_all() return shape not supported. Expected (facilities, availability).")
+
+
+# -------------------------
+# Main
+# -------------------------
 def main():
+    # 필수 env
     database_url = os.environ["DATABASE_URL"]
-    conn = psycopg.connect(database_url)
-    ensure_schema(conn)
+    # public은 페이지에서 쓰는 경우가 많아 env로 없어도 되지만, 세트로 관리하는 편이 좋음
+    _ = os.environ.get("VAPID_PUBLIC_KEY", "")  # optional for server-side sending
+    _ = os.environ["VAPID_PRIVATE_KEY"]
+    _ = os.environ["VAPID_SUBJECT"]
 
-    targets = get_needed_targets(conn)
-    if not targets:
-        print("[INFO] no subscriptions. exit.")
-        return
+    with psycopg.connect(database_url) as conn:
+        ensure_schema(conn)
 
-    # 구독에 등장하는 facility_id만 크롤링하도록 최적화
-    needed_rids = sorted({facility_id for (facility_id, _, _) in targets})
+        # 1) 크롤링 (전체)
+        facilities, availability = crawl_all()
+        print(f"[INFO] crawled facilities={len(availability)}")
 
-    print(f"[INFO] crawl targets rids={len(needed_rids)} subs={len(targets)}")
+        # 2) 이번 크롤에서 등장하는 facility/date 목록 뽑기
+        facility_ids = sorted([str(fid) for fid in availability.keys()])
+        date_keys: Set[str] = set()
+        for _, day_map in availability.items():
+            for dk in day_map.keys():
+                if dk and len(dk) == 8:
+                    date_keys.add(dk)
+        date_list = sorted([ymd_str_to_date(dk) for dk in date_keys])
+        print(f"[INFO] snapshot preload facility_ids={len(facility_ids)} dates={len(date_list)}")
 
-    # tennis_core는 기본 run_all()이 전체 시설을 다 도는 구조라서,
-    # 여기서는 일단 run_all()로 facilities+availability를 받아오고
-    # 필요한 rid만 골라 쓰는 형태로 간다. (나중에 부분크롤링 함수 추가 가능)
-    facilities, availability = tennis_core.run_all()
+        # 3) 스냅샷 preload(배치)
+        old_map = load_snapshot_map(conn, facility_ids, date_list)
 
-    # facility_id가 rid라고 가정
-    # availability: { rid: { "YYYYMMDD": [times...] } }
-    total_push = 0
-    total_added = 0
+        # 4) 구독/엔드포인트 preload
+        subs_map = load_all_subscriptions(conn)
+        endpoints = load_all_endpoints(conn)
 
-    for facility_id, date_ymd, facility_name in targets:
-        date_key = ymd_to_key(date_ymd)
+        # 5) 전체를 돌면서 diff 계산
+        total_added_pairs = 0
+        total_added_slots = 0
+        total_push_requests = 0
 
-        day_map = availability.get(str(facility_id), {})
-        times = day_map.get(date_key, [])
-        new_slots = {slot_key_from_time(t) for t in times}
+        for facility_id, day_map in availability.items():
+            fid = str(facility_id)
+            fname = facilities.get(fid, f"RID {fid}")
 
-        old_slots = load_old_slots(conn, str(facility_id), date_ymd)
-        added = new_slots - old_slots
+            for date_key, times in day_map.items():
+                if not date_key or len(date_key) != 8:
+                    continue
+                d = ymd_str_to_date(date_key)
 
-        # ✅ 첫 실행(기준선 없음)일 때도 "added"가 생기는데,
-        # 알림 스팸 방지하려면: old_slots가 비어있으면 baseline만 저장하고 알림은 건너뛴다.
-        if not old_slots:
-            upsert_snapshot(conn, str(facility_id), date_ymd, new_slots)
-            print(f"[BASELINE] {facility_id} {date_key} baseline={len(new_slots)} (skip notify)")
-            continue
+                new_slots = {slot_key_from_time(t) for t in (times or [])}
+                key = (fid, d)
+                old_slots = old_map.get(key, set())
 
-        if added:
-            subscribers = get_subscribers(conn, str(facility_id), date_ymd)
-            for user_id in subscribers:
-                subscription = get_push_endpoint(conn, user_id)
-                if not subscription:
+                # ✅ 첫 실행(스냅샷 없음): baseline만 저장하고 알림 스킵
+                if not old_slots:
+                    if new_slots:
+                        upsert_snapshot(conn, fid, d, new_slots)
+                        old_map[key] = set(new_slots)  # 메모리도 갱신
                     continue
 
-                to_send = filter_unsent(conn, user_id, str(facility_id), date_ymd, added)
-                if not to_send:
+                added = new_slots - old_slots
+
+                # 변화 없음: snapshot만 갱신(기본은 upsert로 last_seen 갱신)
+                if not added:
+                    if new_slots:
+                        upsert_snapshot(conn, fid, d, new_slots)
+                        old_map[key] = set(new_slots)
                     continue
 
-                # 메시지 구성
-                # 시설명은 subscriptions에 저장된 걸 쓰되, 비어있으면 facilities 맵에서 추정
-                fname = facility_name.strip() or facilities.get(str(facility_id), f"RID {facility_id}")
-                times_preview = ", ".join(sorted(to_send)[:6])
-                more = "" if len(to_send) <= 6 else f" 외 {len(to_send)-6}개"
-                title = "🎾 예약 오픈"
-                body = f"{fname} {date_ymd.strftime('%m/%d')} 신규 슬롯: {times_preview}{more}"
+                # ✅ added가 있을 때만 구독자 매칭
+                users = subs_map.get(key, [])
+                if not users:
+                    # 구독자가 없으면 스냅샷만 갱신
+                    if new_slots:
+                        upsert_snapshot(conn, fid, d, new_slots)
+                        old_map[key] = set(new_slots)
+                    continue
 
-                try:
-                    send_push(subscription, title, body)
-                    mark_sent(conn, user_id, str(facility_id), date_ymd, to_send)
-                    total_push += 1
-                    total_added += len(to_send)
-                except WebPushException as e:
-                    # 410 Gone 같은 경우는 구독이 죽은 것 → 정리(간단 처리)
-                    print(f"[PUSH_FAIL] user={user_id} status={getattr(e.response,'status_code',None)} err={e}")
+                total_added_pairs += 1
+                total_added_slots += len(added)
 
-            # snapshot 갱신(새 슬롯 포함)
-            upsert_snapshot(conn, str(facility_id), date_ymd, new_slots)
-            print(f"[DIFF] {facility_id} {date_key} old={len(old_slots)} new={len(new_slots)} added={len(added)}")
-        else:
-            # 변화 없으면 snapshot만 last_seen 갱신해도 되는데, 일단 new_slots upsert
-            upsert_snapshot(conn, str(facility_id), date_ymd, new_slots)
-            print(f"[NOCHANGE] {facility_id} {date_key} slots={len(new_slots)}")
+                added_list_sorted = sorted(list(added))
 
-    print(f"[SUMMARY] pushes={total_push} added_slots={total_added}")
+                for user_id in users:
+                    sub_info = endpoints.get(user_id)
+                    if not sub_info:
+                        continue
+
+                    already_sent = load_already_sent(conn, user_id, fid, d, added_list_sorted)
+                    to_send = [sk for sk in added_list_sorted if sk not in already_sent]
+                    if not to_send:
+                        continue
+
+                    preview = ", ".join(to_send[:6])
+                    more = "" if len(to_send) <= 6 else f" 외 {len(to_send)-6}개"
+                    title = "🎾 예약 오픈"
+                    body = f"{fname} {d.strftime('%m/%d')} 신규 슬롯: {preview}{more}"
+
+                    try:
+                        send_push(sub_info, title, body)
+                        mark_sent(conn, user_id, fid, d, to_send)
+                        total_push_requests += 1
+                    except WebPushException as e:
+                        # 실패해도 snapshot은 계속 갱신해야 다음 diff가 정상 동작
+                        code = getattr(getattr(e, "response", None), "status_code", None)
+                        print(f"[PUSH_FAIL] user={user_id} fid={fid} date={date_key} status={code} err={e}")
+
+                # 스냅샷 갱신(새 슬롯 포함)
+                if new_slots:
+                    upsert_snapshot(conn, fid, d, new_slots)
+                    old_map[key] = set(new_slots)
+
+                print(f"[DIFF] {fid} {date_key} old={len(old_slots)} new={len(new_slots)} added={len(added)} users={len(users)}")
+
+        print(f"[SUMMARY] added_pairs={total_added_pairs} added_slots={total_added_slots} push_requests={total_push_requests}")
 
 
 if __name__ == "__main__":
