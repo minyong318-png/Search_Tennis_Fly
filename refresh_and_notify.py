@@ -21,9 +21,55 @@ def ymd_str_to_date(yyyymmdd: str) -> date:
     return date(int(yyyymmdd[0:4]), int(yyyymmdd[4:6]), int(yyyymmdd[6:8]))
 
 
-def slot_key_from_time(t: str) -> str:
-    # 코트 구분이 있으면 "HH:MM|court2" 같은 형태로 바꾸면 됨
-    return t.strip()
+def slot_key_from_time(t) -> str:
+    """
+    tennis_core 결과 슬롯이 str이 아니라 dict로 오는 케이스 대응.
+    가능한 키 후보:
+      - time / startTime / start_time / hhmm / label
+      - court / courtNo / court_name 같이 코트 구분
+    최종 slot_key는 "TIME" 또는 "TIME|COURT" 형태로 만든다.
+    """
+    if t is None:
+        return ""
+
+    # 1) 문자열이면 그대로
+    if isinstance(t, str):
+        return t.strip()
+
+    # 2) dict면 time 필드 뽑기
+    if isinstance(t, dict):
+        # 시간 후보 키들
+        time_val = (
+            t.get("time")
+            or t.get("startTime")
+            or t.get("start_time")
+            or t.get("stime")
+            or t.get("label")
+        )
+
+        # 시간이 또 dict로 오면(드문 케이스) 문자열화
+        if isinstance(time_val, dict):
+            time_val = time_val.get("time") or time_val.get("label")
+
+        time_str = str(time_val).strip() if time_val is not None else ""
+
+        # 코트 후보 키들(있으면 붙여서 slot_id를 더 고유하게)
+        court_val = (
+            t.get("court")
+            or t.get("courtNo")
+            or t.get("court_no")
+            or t.get("courtName")
+            or t.get("court_name")
+        )
+        court_str = str(court_val).strip() if court_val is not None else ""
+
+        if court_str and time_str:
+            return f"{time_str}|{court_str}"
+        return time_str
+
+    # 3) 그 외는 문자열로
+    return str(t).strip()
+
 
 
 # -------------------------
