@@ -31,6 +31,10 @@ on:
         description: "샤드 섞기(true/false)"
         required: true
         default: "true"
+      seed:
+        description: "랜덤 시드(동일 시설 샘플 고정). 비우면 랜덤"
+        required: false
+        default: "1234"
 
 jobs:
   bench:
@@ -45,11 +49,32 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: |
+            requirements.txt
+
+      # setup-python의 cache=pip가 대부분 해결하지만,
+      # 한 번 더 확실히 잡고 싶으면 아래 cache step 유지해도 됨.
+      - name: Cache pip (extra)
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
 
       - name: Install deps
         run: |
           python -m pip install --upgrade pip
-          pip install aiohttp beautifulsoup4 lxml
+          pip install -r requirements.txt
+
+      - name: Sanity check files
+        run: |
+          ls -al
+          test -f benchmark_55s.py
+          test -f tennis_core.py
+          test -f facilities_cache.json
+          echo "OK: required files exist."
 
       - name: Run benchmark
         env:
@@ -60,13 +85,22 @@ jobs:
           TIMEOUT: ${{ inputs.timeout }}
           REPEAT: ${{ inputs.repeat }}
           SHUFFLE: ${{ inputs.shuffle }}
+          SEED: ${{ inputs.seed }}
         run: |
           echo "Runner info:"
           uname -a
           python --version
-          echo "Public IP (for rough region check):"
+
+          echo "Public IP (rough region hint):"
           curl -s https://ipinfo.io || true
           echo ""
+
+          # seed가 비어있으면(사용자가 지웠으면) 시드 옵션 없이 실행
+          SEED_ARG=""
+          if [ -n "${SEED}" ]; then
+            SEED_ARG="--seed ${SEED}"
+          fi
+
           echo "Benchmark:"
           python benchmark_55s.py \
             --facilities-cache facilities_cache.json \
@@ -76,4 +110,5 @@ jobs:
             --timebox ${TIMEBOX} \
             --timeout ${TIMEOUT} \
             --repeat ${REPEAT} \
+            ${SEED_ARG} \
             $( [ "${SHUFFLE}" = "true" ] && echo "--shuffle" )

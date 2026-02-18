@@ -158,11 +158,15 @@ def parse_args():
     p.add_argument("--concurrency", type=int, default=5)
     p.add_argument("--shuffle", action="store_true")
     p.add_argument("--repeat", type=int, default=3)
+    p.add_argument("--seed", type=int, default=None, help="랜덤 시드(시설 샘플 고정)")
+
     return p.parse_args()
 
 
 async def main():
     args = parse_args()
+    if args.seed is not None:
+        random.seed(args.seed)
     rids = load_rids_from_cache(args.facilities_cache)
     random.shuffle(rids)
     rids = rids[: args.rid_sample]
