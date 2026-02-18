@@ -1,0 +1,79 @@
+name: Bench 55s (US Runner)
+
+on:
+  workflow_dispatch:
+    inputs:
+      rid_sample:
+        description: "시설 샘플 개수"
+        required: true
+        default: "60"
+      days:
+        description: "내일부터 며칠치"
+        required: true
+        default: "30"
+      concurrency:
+        description: "동시성"
+        required: true
+        default: "8"
+      timebox:
+        description: "타임박스(초)"
+        required: true
+        default: "55"
+      timeout:
+        description: "요청 1개 타임아웃(초)"
+        required: true
+        default: "8"
+      repeat:
+        description: "반복 횟수"
+        required: true
+        default: "3"
+      shuffle:
+        description: "샤드 섞기(true/false)"
+        required: true
+        default: "true"
+
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install aiohttp beautifulsoup4 lxml
+
+      - name: Run benchmark
+        env:
+          RID_SAMPLE: ${{ inputs.rid_sample }}
+          DAYS: ${{ inputs.days }}
+          CONCURRENCY: ${{ inputs.concurrency }}
+          TIMEBOX: ${{ inputs.timebox }}
+          TIMEOUT: ${{ inputs.timeout }}
+          REPEAT: ${{ inputs.repeat }}
+          SHUFFLE: ${{ inputs.shuffle }}
+        run: |
+          echo "Runner info:"
+          uname -a
+          python --version
+          echo "Public IP (for rough region check):"
+          curl -s https://ipinfo.io || true
+          echo ""
+          echo "Benchmark:"
+          python benchmark_55s.py \
+            --facilities-cache facilities_cache.json \
+            --rid-sample ${RID_SAMPLE} \
+            --days ${DAYS} \
+            --concurrency ${CONCURRENCY} \
+            --timebox ${TIMEBOX} \
+            --timeout ${TIMEOUT} \
+            --repeat ${REPEAT} \
+            $( [ "${SHUFFLE}" = "true" ] && echo "--shuffle" )
