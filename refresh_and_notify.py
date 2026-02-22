@@ -171,92 +171,98 @@ def crawl_all() -> Tuple[Dict[str, Any], Dict[str, Dict[str, List[Any]]]]:
       availability: { facility_id: { "YYYYMMDD": [slot, ...] } }
     """
 
+    target = (os.getenv("RUN_TARGET") or "all").strip().lower()
+
+    facilities = {}
+    availability = {}
     # -----------------------------
     # (A) 용인 (tennis_core)
     # -----------------------------
-    y_fac, y_av = tennis_core.run_all()
+    if target in ("all", "yongin"):
+        y_fac, y_av = tennis_core.run_all()
 
-    facilities: Dict[str, Any] = {}
-    availability: Dict[str, Dict[str, List[Any]]] = {}
+        facilities: Dict[str, Any] = {}
+        availability: Dict[str, Dict[str, List[Any]]] = {}
 
-    for rid, meta in (y_fac or {}).items():
-        rid = str(rid)
-        fid = _ns_yongin_id(rid)
-        facilities[fid] = meta
+        for rid, meta in (y_fac or {}).items():
+            rid = str(rid)
+            fid = _ns_yongin_id(rid)
+            facilities[fid] = meta
 
-    for rid, daymap in (y_av or {}).items():
-        rid = str(rid)
-        fid = _ns_yongin_id(rid)
-        # daymap 키는 이미 YYYYMMDD 형태
-        availability[fid] = daymap or {}
+        for rid, daymap in (y_av or {}).items():
+            rid = str(rid)
+            fid = _ns_yongin_id(rid)
+            # daymap 키는 이미 YYYYMMDD 형태
+            availability[fid] = daymap or {}
 
     # -----------------------------
     # (B) 고양 (crawl_goyang)
     # -----------------------------
     # crawl_goyang은 {"facilities":..., "availability":...} 형태로 반환
-    out_g1 = crawl_goyang.crawl_gytennis()
-    out_g2 = crawl_goyang.crawl_daehwa()
-    g_fac = {**out_g1.get("facilities", {}), **out_g2.get("facilities", {})}
-    g_av  = {**out_g1.get("availability", {}), **out_g2.get("availability", {})}
+    if target in ("all", "goyang"):
+        out_g1 = crawl_goyang.crawl_gytennis()
+        out_g2 = crawl_goyang.crawl_daehwa()
+        g_fac = {**out_g1.get("facilities", {}), **out_g2.get("facilities", {})}
+        g_av  = {**out_g1.get("availability", {}), **out_g2.get("availability", {})}
 
-    # 1) 시설 id 매핑: gy-gytennis-10 -> goyang:gytennis:10 / gy-daehwa -> goyang:daehwa
-    for raw_fid, meta in (g_fac or {}).items():
-        raw_fid = str(raw_fid)
+        # 1) 시설 id 매핑: gy-gytennis-10 -> goyang:gytennis:10 / gy-daehwa -> goyang:daehwa
+        for raw_fid, meta in (g_fac or {}).items():
+            raw_fid = str(raw_fid)
 
-        if raw_fid.startswith("gy-gytennis-"):
-            cv = raw_fid.split("gy-gytennis-", 1)[1]
-            fid = _ns_goyang_id("gytennis", cv)
-        elif raw_fid == "gy-daehwa":
-            fid = "goyang:daehwa"
-        else:
-            fid = f"goyang:{raw_fid}"
+            if raw_fid.startswith("gy-gytennis-"):
+                cv = raw_fid.split("gy-gytennis-", 1)[1]
+                fid = _ns_goyang_id("gytennis", cv)
+            elif raw_fid == "gy-daehwa":
+                fid = "goyang:daehwa"
+            else:
+                fid = f"goyang:{raw_fid}"
 
-        facilities[fid] = meta
+            facilities[fid] = meta
 
-    # 2) availability 키 변환:
-    #    - 날짜키 "YYYY-MM-DD" -> "YYYYMMDD"
-    #    - slot에 reserveUrl(고양 전용 링크) 넣어주기(프론트 탭에서 클릭 가능하게)
-    for raw_fid, daymap in (g_av or {}).items():
-        raw_fid = str(raw_fid)
+        # 2) availability 키 변환:
+        #    - 날짜키 "YYYY-MM-DD" -> "YYYYMMDD"
+        #    - slot에 reserveUrl(고양 전용 링크) 넣어주기(프론트 탭에서 클릭 가능하게)
+        for raw_fid, daymap in (g_av or {}).items():
+            raw_fid = str(raw_fid)
 
-        if raw_fid.startswith("gy-gytennis-"):
-            cv = raw_fid.split("gy-gytennis-", 1)[1]
-            fid = _ns_goyang_id("gytennis", cv)
-            kind = "gytennis"
-        elif raw_fid == "gy-daehwa":
-            fid = "goyang:daehwa"
-            kind = "daehwa"
-        else:
-            fid = f"goyang:{raw_fid}"
-            kind = "other"
+            if raw_fid.startswith("gy-gytennis-"):
+                cv = raw_fid.split("gy-gytennis-", 1)[1]
+                fid = _ns_goyang_id("gytennis", cv)
+                kind = "gytennis"
+            elif raw_fid == "gy-daehwa":
+                fid = "goyang:daehwa"
+                kind = "daehwa"
+            else:
+                fid = f"goyang:{raw_fid}"
+                kind = "other"
 
-        new_daymap: Dict[str, List[Any]] = {}
-        for ymd, slots in (daymap or {}).items():
-            ymd = str(ymd)
-            yyyymmdd = _ymd_to_yyyymmdd(ymd)
-            if len(yyyymmdd) != 8:
-                continue
+            new_daymap: Dict[str, List[Any]] = {}
+            for ymd, slots in (daymap or {}).items():
+                ymd = str(ymd)
+                yyyymmdd = _ymd_to_yyyymmdd(ymd)
+                if len(yyyymmdd) != 8:
+                    continue
 
-            enriched = []
-            for s in (slots or []):
-                if isinstance(s, dict):
-                    ss = dict(s)
-                    # ✅ 고양 클릭 링크: gytennis는 날짜 페이지로
-                    if kind == "gytennis":
-                        # ymd가 'YYYY-MM-DD'로 들어올 때가 있어서 원본도 유지
-                        ymd_dash = ymd if "-" in ymd else f"{yyyymmdd[:4]}-{yyyymmdd[4:6]}-{yyyymmdd[6:8]}"
-                        ss["reserveUrl"] = f"https://www.gytennis.or.kr/daily/{cv}/{ymd_dash}"
-                    elif kind == "daehwa":
-                        ss["reserveUrl"] = "https://daehwa.gys.or.kr:451/rent/tennis_rent.php"
-                    enriched.append(ss)
-                else:
-                    enriched.append(s)
+                enriched = []
+                for s in (slots or []):
+                    if isinstance(s, dict):
+                        ss = dict(s)
+                        # ✅ 고양 클릭 링크: gytennis는 날짜 페이지로
+                        if kind == "gytennis":
+                            # ymd가 'YYYY-MM-DD'로 들어올 때가 있어서 원본도 유지
+                            ymd_dash = ymd if "-" in ymd else f"{yyyymmdd[:4]}-{yyyymmdd[4:6]}-{yyyymmdd[6:8]}"
+                            ss["reserveUrl"] = f"https://www.gytennis.or.kr/daily/{cv}/{ymd_dash}"
+                        elif kind == "daehwa":
+                            ss["reserveUrl"] = "https://daehwa.gys.or.kr:451/rent/tennis_rent.php"
+                        enriched.append(ss)
+                    else:
+                        enriched.append(s)
 
-            if enriched:
-                new_daymap[yyyymmdd] = enriched
+                if enriched:
+                    new_daymap[yyyymmdd] = enriched
 
-        if new_daymap:
-            availability[fid] = new_daymap
+            if new_daymap:
+                availability[fid] = new_daymap
 
     return facilities, availability
     
