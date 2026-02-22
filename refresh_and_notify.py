@@ -164,25 +164,29 @@ def _ymd_to_yyyymmdd(s: str) -> str:
 # =========================================================
 # Crawl adapter
 # =========================================================
+def _clean_goyang_title(title: str) -> str:
+    if not title:
+        return title
+    # "고양특례시테니스협회 " 제거 (공백 유무 모두 대응)
+    return title.replace("고양특례시테니스협회", "").strip()
+
+
 def crawl_all() -> Tuple[Dict[str, Any], Dict[str, Dict[str, List[Any]]]]:
     """
     최종 반환:
       facilities: { facility_id(text): {title, location, ...} }
       availability: { facility_id: { "YYYYMMDD": [slot, ...] } }
     """
-
     target = (os.getenv("RUN_TARGET") or "all").strip().lower()
 
-    facilities = {}
-    availability = {}
+    facilities: Dict[str, Any] = {}
+    availability: Dict[str, Dict[str, List[Any]]] = {}
+
     # -----------------------------
     # (A) 용인 (tennis_core)
     # -----------------------------
     if target in ("all", "yongin"):
         y_fac, y_av = tennis_core.run_all()
-
-        facilities: Dict[str, Any] = {}
-        availability: Dict[str, Dict[str, List[Any]]] = {}
 
         for rid, meta in (y_fac or {}).items():
             rid = str(rid)
@@ -192,20 +196,25 @@ def crawl_all() -> Tuple[Dict[str, Any], Dict[str, Dict[str, List[Any]]]]:
         for rid, daymap in (y_av or {}).items():
             rid = str(rid)
             fid = _ns_yongin_id(rid)
-            # daymap 키는 이미 YYYYMMDD 형태
             availability[fid] = daymap or {}
 
     # -----------------------------
     # (B) 고양 (crawl_goyang)
     # -----------------------------
-    # crawl_goyang은 {"facilities":..., "availability":...} 형태로 반환
     if target in ("all", "goyang"):
         out_g1 = crawl_goyang.crawl_gytennis()
-        out_g2 = crawl_goyang.crawl_daehwa()
+
+        # ✅ daehwa는 로그인정보 없으면 스킵(실패로 전체 종료 방지)
+        try:
+            out_g2 = crawl_goyang.crawl_daehwa()
+        except Exception as e:
+            print("[DAEHWA] skipped:", e)
+            out_g2 = {"facilities": {}, "availability": {}}
+
         g_fac = {**out_g1.get("facilities", {}), **out_g2.get("facilities", {})}
         g_av  = {**out_g1.get("availability", {}), **out_g2.get("availability", {})}
 
-        # 1) 시설 id 매핑: gy-gytennis-10 -> goyang:gytennis:10 / gy-daehwa -> goyang:daehwa
+        # 1) 시설 id 매핑 + title 정리(접두어 제거)
         for raw_fid, meta in (g_fac or {}).items():
             raw_fid = str(raw_fid)
 
@@ -217,11 +226,11 @@ def crawl_all() -> Tuple[Dict[str, Any], Dict[str, Dict[str, List[Any]]]]:
             else:
                 fid = f"goyang:{raw_fid}"
 
-            facilities[fid] = meta
+            meta2 = dict(meta or {})
+            meta2["title"] = _clean_goyang_title(meta2.get("title", ""))
+            facilities[fid] = meta2
 
-        # 2) availability 키 변환:
-        #    - 날짜키 "YYYY-MM-DD" -> "YYYYMMDD"
-        #    - slot에 reserveUrl(고양 전용 링크) 넣어주기(프론트 탭에서 클릭 가능하게)
+        # 2) availability 키 변환 + reserveUrl 넣기
         for raw_fid, daymap in (g_av or {}).items():
             raw_fid = str(raw_fid)
 
@@ -232,9 +241,11 @@ def crawl_all() -> Tuple[Dict[str, Any], Dict[str, Dict[str, List[Any]]]]:
             elif raw_fid == "gy-daehwa":
                 fid = "goyang:daehwa"
                 kind = "daehwa"
+                cv = None
             else:
                 fid = f"goyang:{raw_fid}"
                 kind = "other"
+                cv = None
 
             new_daymap: Dict[str, List[Any]] = {}
             for ymd, slots in (daymap or {}).items():
@@ -247,13 +258,14 @@ def crawl_all() -> Tuple[Dict[str, Any], Dict[str, Dict[str, List[Any]]]]:
                 for s in (slots or []):
                     if isinstance(s, dict):
                         ss = dict(s)
-                        # ✅ 고양 클릭 링크: gytennis는 날짜 페이지로
-                        if kind == "gytennis":
-                            # ymd가 'YYYY-MM-DD'로 들어올 때가 있어서 원본도 유지
+
+                        # ✅ 고양 클릭 링크
+                        if kind == "gytennis" and cv:
                             ymd_dash = ymd if "-" in ymd else f"{yyyymmdd[:4]}-{yyyymmdd[4:6]}-{yyyymmdd[6:8]}"
                             ss["reserveUrl"] = f"https://www.gytennis.or.kr/daily/{cv}/{ymd_dash}"
                         elif kind == "daehwa":
                             ss["reserveUrl"] = "https://daehwa.gys.or.kr:451/rent/tennis_rent.php"
+
                         enriched.append(ss)
                     else:
                         enriched.append(s)
@@ -265,7 +277,6 @@ def crawl_all() -> Tuple[Dict[str, Any], Dict[str, Dict[str, List[Any]]]]:
                 availability[fid] = new_daymap
 
     return facilities, availability
-    
 
 # =========================================================
 # DB write: facilities / availability_cache (프론트용)
@@ -711,17 +722,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    # RUN_TARGET: all | yongin | goyang
-    target = (os.getenv("RUN_TARGET") or "all").strip().lower()
-
-    # 기존에 crawl_all()에서 두 도시를 합치도록 바꿨다면:
-    # - target에 따라 crawl 함수만 달리 호출되게 하면 됨.
-    # (너가 이전에 합쳐둔 상태 기준 예시)
-    if target == "yongin":
-        os.environ["CRAWL_PROVIDER"] = "yongin"
-    elif target == "goyang":
-        os.environ["CRAWL_PROVIDER"] = "goyang"
-    else:
-        os.environ["CRAWL_PROVIDER"] = "all"
-
     main()
