@@ -263,8 +263,8 @@ def is_login_page(html: str, final_url: str = "") -> bool:
 
 
 def login_daehwa(s: requests.Session) -> None:
-    user_id = "ccoo2000"
-    user_pw = "alsdydWkd1!"
+    user_id = os.environ.get("GYS_ID")
+    user_pw = os.environ.get("GYS_PW")
     if not user_id or not user_pw:
         raise RuntimeError("Set env vars GYS_ID / GYS_PW for daehwa login")
 
