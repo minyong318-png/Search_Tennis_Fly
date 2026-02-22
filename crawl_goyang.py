@@ -401,6 +401,10 @@ def parse_slots_daehwa(html: str, summary_keyword: str = "이용신청 테이블
 
         val = (cb.get("value") or "").strip()
 
+        # ✅ 성저 규칙: rent_chk가 8자리 숫자면 예약 불가(더미) → 제외
+        if re.fullmatch(r"\d{8}", val):
+            continue
+
         txt = re.sub(r"\s+", " ", tr.get_text(" ", strip=True)).strip()
         m = TIME_RE.search(txt)
         if not m:
