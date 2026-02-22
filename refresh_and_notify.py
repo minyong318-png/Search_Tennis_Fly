@@ -705,4 +705,17 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    # RUN_TARGET: all | yongin | goyang
+    target = (os.getenv("RUN_TARGET") or "all").strip().lower()
+
+    # 기존에 crawl_all()에서 두 도시를 합치도록 바꿨다면:
+    # - target에 따라 crawl 함수만 달리 호출되게 하면 됨.
+    # (너가 이전에 합쳐둔 상태 기준 예시)
+    if target == "yongin":
+        os.environ["CRAWL_PROVIDER"] = "yongin"
+    elif target == "goyang":
+        os.environ["CRAWL_PROVIDER"] = "goyang"
+    else:
+        os.environ["CRAWL_PROVIDER"] = "all"
+
     main()
