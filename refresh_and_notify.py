@@ -170,12 +170,53 @@ def _clean_goyang_title(title: str) -> str:
     # "고양특례시테니스협회 " 제거 (공백 유무 모두 대응)
     return title.replace("고양특례시테니스협회", "").strip()
 
+def _goyang_split_title(meta: dict, suffix: str) -> dict:
+    """시설 meta를 복사해서 title에 suffix를 붙인다."""
+    m = dict(meta or {})
+    base = _clean_goyang_title(m.get("title", "")).strip()
+    if suffix:
+        m["title"] = f"{base} {suffix}".strip()
+    else:
+        m["title"] = base
+    return m
+
+
+def _split_daymap_by_court(
+    daymap: Dict[str, List[Any]],
+    reserve_url_builder,
+) -> Dict[str, Dict[str, List[dict]]]:
+    """
+    daymap: {yyyymmdd: [slot(dict)...]}
+    return: {courtNo: {yyyymmdd: [slot(dict)...]}}
+    reserve_url_builder(slot, yyyymmdd) -> str | None
+    """
+    out: Dict[str, Dict[str, List[dict]]] = {}
+    for yyyymmdd, slots in (daymap or {}).items():
+        for s in (slots or []):
+            if not isinstance(s, dict):
+                continue
+            cno = str(s.get("courtNo") or "").strip()
+            if not cno:
+                continue
+            ss = dict(s)
+            url = reserve_url_builder(ss, yyyymmdd)
+            if url:
+                ss["reserveUrl"] = url
+            out.setdefault(cno, {}).setdefault(yyyymmdd, []).append(ss)
+    return out
 
 def crawl_all() -> Tuple[Dict[str, Any], Dict[str, Dict[str, List[Any]]]]:
     """
     최종 반환:
       facilities: { facility_id(text): {title, location, ...} }
       availability: { facility_id: { "YYYYMMDD": [slot, ...] } }
+
+    ✅ 고양은 "코트별 facility"로 분리해서 반환
+      - gytennis: goyang:gytennis:{courtvalue}:{courtNo}
+      - daehwa  : goyang:daehwa:{courtNo}
+
+    ✅ RUN_TARGET
+      - yongin / goyang / all
     """
     target = (os.getenv("RUN_TARGET") or "all").strip().lower()
 
@@ -212,72 +253,138 @@ def crawl_all() -> Tuple[Dict[str, Any], Dict[str, Dict[str, List[Any]]]]:
             out_g2 = {"facilities": {}, "availability": {}}
 
         g_fac = {**out_g1.get("facilities", {}), **out_g2.get("facilities", {})}
-        g_av  = {**out_g1.get("availability", {}), **out_g2.get("availability", {})}
+        g_av = {**out_g1.get("availability", {}), **out_g2.get("availability", {})}
 
-        # 1) 시설 id 매핑 + title 정리(접두어 제거)
+        # -------------------------------------------------
+        # 고양 base meta 확보 (코트별 분리 시 title 생성용)
+        # -------------------------------------------------
+        base_meta_gytennis: Dict[str, dict] = {}   # cv -> meta2
+        base_meta_daehwa: Optional[dict] = None
+
         for raw_fid, meta in (g_fac or {}).items():
             raw_fid = str(raw_fid)
+            meta2 = dict(meta or {})
+            meta2["title"] = _clean_goyang_title(meta2.get("title", ""))
 
             if raw_fid.startswith("gy-gytennis-"):
                 cv = raw_fid.split("gy-gytennis-", 1)[1]
-                fid = _ns_goyang_id("gytennis", cv)
-            elif raw_fid == "gy-daehwa":
-                fid = "goyang:daehwa"
-            else:
-                fid = f"goyang:{raw_fid}"
+                base_meta_gytennis[cv] = meta2
+                continue
 
-            meta2 = dict(meta or {})
-            meta2["title"] = _clean_goyang_title(meta2.get("title", ""))
+            if raw_fid == "gy-daehwa":
+                base_meta_daehwa = meta2
+                continue
+
+            # 기타 facility가 있다면 그대로 저장
+            fid = f"goyang:{raw_fid}"
             facilities[fid] = meta2
 
-        # 2) availability 키 변환 + reserveUrl 넣기
+        def _goyang_split_title(meta: dict, suffix: str) -> dict:
+            m = dict(meta or {})
+            base = _clean_goyang_title(m.get("title", "")).strip()
+            m["title"] = f"{base} {suffix}".strip() if suffix else base
+            return m
+
+        def _split_daymap_by_court(
+            daymap: Dict[str, List[Any]],
+            reserve_url_builder,
+        ) -> Dict[str, Dict[str, List[dict]]]:
+            """
+            daymap: {yyyymmdd: [slot(dict)...]}
+            return: {courtNo: {yyyymmdd: [slot(dict)...]}}
+            reserve_url_builder(slot, yyyymmdd) -> str | None
+            """
+            out: Dict[str, Dict[str, List[dict]]] = {}
+            for yyyymmdd, slots in (daymap or {}).items():
+                for s in (slots or []):
+                    if not isinstance(s, dict):
+                        continue
+                    cno = str(s.get("courtNo") or "").strip()
+                    if not cno:
+                        continue
+                    ss = dict(s)
+                    url = reserve_url_builder(ss, yyyymmdd)
+                    if url:
+                        ss["reserveUrl"] = url
+                    out.setdefault(cno, {}).setdefault(yyyymmdd, []).append(ss)
+            return out
+
+        # -------------------------------------------------
+        # availability 처리: 날짜키 변환 + 코트별 facility로 분리
+        # -------------------------------------------------
         for raw_fid, daymap in (g_av or {}).items():
             raw_fid = str(raw_fid)
 
+            # ---------- gytennis (courtvalue별) ----------
             if raw_fid.startswith("gy-gytennis-"):
                 cv = raw_fid.split("gy-gytennis-", 1)[1]
-                fid = _ns_goyang_id("gytennis", cv)
-                kind = "gytennis"
-            elif raw_fid == "gy-daehwa":
-                fid = "goyang:daehwa"
-                kind = "daehwa"
-                cv = None
-            else:
-                fid = f"goyang:{raw_fid}"
-                kind = "other"
-                cv = None
 
+                # 1) 날짜키 "YYYY-MM-DD" -> "YYYYMMDD" 변환
+                new_daymap: Dict[str, List[Any]] = {}
+                for ymd, slots in (daymap or {}).items():
+                    ymd = str(ymd)
+                    yyyymmdd = _ymd_to_yyyymmdd(ymd)
+                    if len(yyyymmdd) != 8:
+                        continue
+                    new_daymap[yyyymmdd] = slots or []
+
+                # 2) reserveUrl 빌더
+                def gytennis_url_builder(slot: dict, yyyymmdd: str) -> str:
+                    ymd_dash = f"{yyyymmdd[:4]}-{yyyymmdd[4:6]}-{yyyymmdd[6:8]}"
+                    return f"https://www.gytennis.or.kr/daily/{cv}/{ymd_dash}"
+
+                # 3) 코트별 분리
+                split = _split_daymap_by_court(new_daymap, gytennis_url_builder)
+
+                base_meta = base_meta_gytennis.get(cv, {"title": f"{cv}코트", "location": "고양시", "courtvalue": cv})
+
+                for cno, c_daymap in split.items():
+                    fid = f"goyang:gytennis:{cv}:{cno}"
+                    facilities[fid] = _goyang_split_title(base_meta, f"{cno}코트")
+                    availability[fid] = c_daymap
+
+                continue
+
+            # ---------- daehwa ----------
+            if raw_fid == "gy-daehwa":
+                # 1) 날짜키 변환
+                new_daymap: Dict[str, List[Any]] = {}
+                for ymd, slots in (daymap or {}).items():
+                    ymd = str(ymd)
+                    yyyymmdd = _ymd_to_yyyymmdd(ymd)
+                    if len(yyyymmdd) != 8:
+                        continue
+                    new_daymap[yyyymmdd] = slots or []
+
+                # 2) reserveUrl 빌더
+                def daehwa_url_builder(slot: dict, yyyymmdd: str) -> str:
+                    return "https://daehwa.gys.or.kr:451/rent/tennis_rent.php"
+
+                # 3) 코트별 분리
+                split = _split_daymap_by_court(new_daymap, daehwa_url_builder)
+
+                base_meta = base_meta_daehwa or {"title": "대화", "location": "고양시"}
+
+                for cno, c_daymap in split.items():
+                    fid = f"goyang:daehwa:{cno}"
+                    facilities[fid] = _goyang_split_title(base_meta, f"{cno}코트")
+                    availability[fid] = c_daymap
+
+                continue
+
+            # ---------- 기타 ----------
+            fid = f"goyang:{raw_fid}"
             new_daymap: Dict[str, List[Any]] = {}
             for ymd, slots in (daymap or {}).items():
                 ymd = str(ymd)
                 yyyymmdd = _ymd_to_yyyymmdd(ymd)
                 if len(yyyymmdd) != 8:
                     continue
-
-                enriched = []
-                for s in (slots or []):
-                    if isinstance(s, dict):
-                        ss = dict(s)
-
-                        # ✅ 고양 클릭 링크
-                        if kind == "gytennis" and cv:
-                            ymd_dash = ymd if "-" in ymd else f"{yyyymmdd[:4]}-{yyyymmdd[4:6]}-{yyyymmdd[6:8]}"
-                            ss["reserveUrl"] = f"https://www.gytennis.or.kr/daily/{cv}/{ymd_dash}"
-                        elif kind == "daehwa":
-                            ss["reserveUrl"] = "https://daehwa.gys.or.kr:451/rent/tennis_rent.php"
-
-                        enriched.append(ss)
-                    else:
-                        enriched.append(s)
-
-                if enriched:
-                    new_daymap[yyyymmdd] = enriched
-
+                new_daymap[yyyymmdd] = slots or []
             if new_daymap:
                 availability[fid] = new_daymap
 
     return facilities, availability
-
 # =========================================================
 # DB write: facilities / availability_cache (프론트용)
 # =========================================================
