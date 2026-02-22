@@ -309,6 +309,45 @@ def upsert_facilities_for_frontend(conn: psycopg.Connection, facilities: Dict[st
         )
     conn.commit()
 
+def clear_availability_cache_for_target(
+    conn: psycopg.Connection,
+    target: str,
+    start_yyyymmdd: str,
+    end_yyyymmdd: str,
+) -> None:
+    """
+    타겟별로 해당 기간의 availability_cache를 빈 배열로 초기화한다.
+    - DELETE가 아니라 slots_json='[]'로 초기화 (충돌/외래키 안전)
+    - target: yongin | goyang | all
+    """
+    target = (target or "all").strip().lower()
+
+    prefixes = []
+    if target in ("all", "yongin"):
+        prefixes.append("yongin:%")
+    if target in ("all", "goyang"):
+        prefixes.append("goyang:%")
+
+    if not prefixes:
+        return
+
+    d1 = yyyymmdd_to_date(start_yyyymmdd)
+    d2 = yyyymmdd_to_date(end_yyyymmdd)
+
+    with conn.cursor() as cur:
+        # 여러 prefix를 OR로 처리
+        where = " OR ".join([f"facility_id LIKE %s" for _ in prefixes])
+        cur.execute(
+            f"""
+            update public.availability_cache
+               set slots_json = '[]'::jsonb,
+                   updated_at = now()
+             where date_ymd between %s and %s
+               and ({where})
+            """,
+            (d1, d2, *prefixes),
+        )
+    conn.commit()
 
 def upsert_availability_cache_for_frontend(
     conn: psycopg.Connection,
@@ -524,7 +563,17 @@ def bulk_upsert_slots_snapshot(conn: psycopg.Connection, snapshot_rows: List[Tup
         )
     conn.commit()
 
-
+def compute_minmax_yyyymmdd(availability: Dict[str, Dict[str, List[Any]]]) -> Tuple[str, str] | None:
+    ys = []
+    for _, day_map in (availability or {}).items():
+        for ymd in (day_map or {}).keys():
+            ymd = str(ymd)
+            if len(ymd) == 8 and ymd.isdigit():
+                ys.append(ymd)
+    if not ys:
+        return None
+    ys.sort()
+    return ys[0], ys[-1]
 # =========================================================
 # Push
 # =========================================================
@@ -545,6 +594,8 @@ def send_push(subscription_info: dict, title: str, body: str) -> None:
 # Main
 # =========================================================
 def main() -> None:
+    target = (os.getenv("RUN_TARGET") or "all").strip().lower()
+    print(f"[RUN] target={target}")
     database_url = os.environ["DATABASE_URL"]
     _ = os.environ.get("VAPID_PUBLIC_KEY", "")
     _ = os.environ["VAPID_PRIVATE_KEY"]
@@ -559,10 +610,20 @@ def main() -> None:
     with psycopg.connect(database_url) as conn:
         # 프론트용 테이블만 (없으면) 추가 생성
         ensure_extra_schema(conn)
-
+        
         # 1) 크롤링
         facilities, availability = crawl_all()
         print(f"[INFO] crawled facilities={len(availability)}")
+
+        # ✅ 이번 실행 타겟/기간에 해당하는 캐시를 먼저 비워두고(빈 배열),
+        #    아래 upsert에서 다시 채운다.
+        mm = compute_minmax_yyyymmdd(availability)
+        if mm:
+            start_ymd, end_ymd = mm
+            print(f"[CACHE] clear target={target} range={start_ymd}~{end_ymd}")
+            clear_availability_cache_for_target(conn, target, start_ymd, end_ymd)
+        else:
+            print("[CACHE] skip clear: no dates in availability")
 
         # 2) 프론트용 저장 (시설/availability_cache)
         try:
