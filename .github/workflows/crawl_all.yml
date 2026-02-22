@@ -1,4 +1,4 @@
-name: Crawl Goyang & Notify
+name: Crawl all & Notify
 
 on:
   workflow_dispatch:
