@@ -173,9 +173,8 @@ def parse_gytennis_slots(html: str) -> Dict[str, List[dict]]:
             if td.select_one("input[disabled]") is not None:
                 continue
 
-            # ✅ 네가 확인한 방식: tooltip-trigger가 있으면 "이미 예약/정보 있음"으로 보고 제외
-            has_tooltip = td.select_one(".ctooltip-trigger") is not None
-            if has_tooltip:
+            avail_cb = td.select_one('input[name="isvkrr[]"]:not([disabled])')
+            if not avail_cb:
                 continue
 
             # 여기까지 오면 "빈칸 = 잔여"
