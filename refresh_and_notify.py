@@ -25,6 +25,11 @@ def kst_today_yyyymmdd() -> str:
     return datetime.now(KST).strftime("%Y%m%d")
 
 
+def is_goyang_crawl_window() -> bool:
+    now = datetime.now(KST)
+    return 5 <= now.hour < 22
+
+
 def to_yyyymmdd(s: str) -> str:
     """
     alarms.date가 "YYYY-MM-DD" 또는 "YYYYMMDD" 둘 다 올 수 있음.
@@ -249,7 +254,7 @@ def crawl_all() -> Tuple[Dict[str, Any], Dict[str, Dict[str, List[Any]]]]:
     # -----------------------------
     # (B) 고양 (crawl_goyang)
     # -----------------------------
-    if target in ("all", "goyang"):
+    if target in ("all", "goyang") and is_goyang_crawl_window():
         out_g1 = crawl_goyang.crawl_gytennis()
 
         # ✅ daehwa는 로그인정보 없으면 스킵(실패로 전체 종료 방지)
@@ -390,6 +395,10 @@ def crawl_all() -> Tuple[Dict[str, Any], Dict[str, Dict[str, List[Any]]]]:
                 new_daymap[yyyymmdd] = slots or []
             if new_daymap:
                 availability[fid] = new_daymap
+
+    if target in ("all", "goyang") and not is_goyang_crawl_window():
+        now_kst = datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S")
+        print(f"[GOYANG] skipped outside KST window (05:00~22:00): now={now_kst}")
 
     return facilities, availability
 # =========================================================
