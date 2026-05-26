@@ -1,6 +1,6 @@
 import os
 import json
-from datetime import datetime, date
+from datetime import datetime, date, timedelta, timezone
 from typing import Dict, List, Set, Tuple, Optional, Iterable, Any
 
 import psycopg
@@ -16,6 +16,13 @@ import crawl_goyang
 # =========================================================
 def utcnow() -> datetime:
     return datetime.utcnow()
+
+
+KST = timezone(timedelta(hours=9))
+
+
+def kst_today_yyyymmdd() -> str:
+    return datetime.now(KST).strftime("%Y%m%d")
 
 
 def to_yyyymmdd(s: str) -> str:
@@ -421,6 +428,7 @@ def clear_availability_cache_for_target(
     target: str,
     start_yyyymmdd: str,
     end_yyyymmdd: str,
+    keep_yongin_today: bool = False,
 ) -> None:
     """
     타겟별로 해당 기간의 availability_cache를 빈 배열로 초기화한다.
@@ -441,9 +449,18 @@ def clear_availability_cache_for_target(
     d1 = yyyymmdd_to_date(start_yyyymmdd)
     d2 = yyyymmdd_to_date(end_yyyymmdd)
 
+    today_d = yyyymmdd_to_date(kst_today_yyyymmdd())
+
     with conn.cursor() as cur:
         # 여러 prefix를 OR로 처리
         where = " OR ".join([f"facility_id LIKE %s" for _ in prefixes])
+        extra_guard = ""
+        if keep_yongin_today:
+            # 용인 당일 데이터는 전날 말미(23:59 근접) 스냅샷을 유지한다.
+            extra_guard = " and not (facility_id like 'yongin:%' and date_ymd = %s)"
+        params = [d1, d2, *prefixes]
+        if keep_yongin_today:
+            params.append(today_d)
         cur.execute(
             f"""
             update public.availability_cache
@@ -451,8 +468,9 @@ def clear_availability_cache_for_target(
                    updated_at = now()
              where date_ymd between %s and %s
                and ({where})
+               {extra_guard}
             """,
-            (d1, d2, *prefixes),
+            tuple(params),
         )
     conn.commit()
 
@@ -460,6 +478,7 @@ def upsert_availability_cache_for_frontend(
     conn: psycopg.Connection,
     facilities: Dict[str, Any],
     availability: Dict[str, Dict[str, List[Any]]],
+    keep_yongin_today: bool = False,
 ) -> None:
     """
     availability_cache는 프론트가 /api/data 대신 읽는 용도.
@@ -468,11 +487,16 @@ def upsert_availability_cache_for_frontend(
     ts = utcnow()
     rows = []
 
+    today_ymd = kst_today_yyyymmdd()
+
     for fid, day_map in availability.items():
         fid = str(fid)
         for ymd, slots in (day_map or {}).items():
             ymd = (ymd or "").strip()
             if len(ymd) != 8:
+                continue
+            if keep_yongin_today and fid.startswith("yongin:") and ymd == today_ymd:
+                # 당일 용인 데이터는 기존 스냅샷 유지(전날 23:59 근접값)
                 continue
             d = yyyymmdd_to_date(ymd)
 
@@ -728,14 +752,25 @@ def main() -> None:
         if mm:
             start_ymd, end_ymd = mm
             print(f"[CACHE] clear target={target} range={start_ymd}~{end_ymd}")
-            clear_availability_cache_for_target(conn, target, start_ymd, end_ymd)
+            clear_availability_cache_for_target(
+                conn,
+                target,
+                start_ymd,
+                end_ymd,
+                keep_yongin_today=(target in ("all", "yongin")),
+            )
         else:
             print("[CACHE] skip clear: no dates in availability")
 
         # 2) 프론트용 저장 (시설/availability_cache)
         try:
             upsert_facilities_for_frontend(conn, facilities)
-            upsert_availability_cache_for_frontend(conn, facilities, availability)
+            upsert_availability_cache_for_frontend(
+                conn,
+                facilities,
+                availability,
+                keep_yongin_today=(target in ("all", "yongin")),
+            )
         except Exception as e:
             # 프론트용 저장이 실패해도 알림은 계속 수행할 수 있게 한다
             print(f"[WARN] frontend cache save failed: {e}")
