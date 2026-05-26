@@ -574,6 +574,26 @@ def load_alarms(conn: psycopg.Connection) -> List[dict]:
         return cur.fetchall()
 
 
+def cleanup_expired_alarms(conn: psycopg.Connection) -> int:
+    """
+    KST 기준 오늘보다 과거 날짜 알람을 자동 삭제한다.
+    alarms.date는 YYYY-MM-DD 또는 YYYYMMDD 모두 허용한다.
+    """
+    today_ymd = kst_today_yyyymmdd()
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            delete from public.alarms
+             where replace(coalesce(date, ''), '-', '') ~ '^[0-9]{8}$'
+               and replace(date, '-', '') < %s
+            """,
+            (today_ymd,),
+        )
+        deleted = cur.rowcount or 0
+    conn.commit()
+    return deleted
+
+
 def preload_baseline(conn: psycopg.Connection, keys: List[Tuple[str, str, str]]) -> Dict[Tuple[str, str, str], Set[str]]:
     """
     baseline_slots: subscription_id, court_group, date(char/text), time_content
@@ -751,6 +771,9 @@ def main() -> None:
     with psycopg.connect(database_url) as conn:
         # 프론트용 테이블만 (없으면) 추가 생성
         ensure_extra_schema(conn)
+        deleted_alarms = cleanup_expired_alarms(conn)
+        if deleted_alarms:
+            print(f"[ALARMS] expired deleted={deleted_alarms} (KST<{kst_today_yyyymmdd()})")
         
         # 1) 크롤링
         facilities, availability = crawl_all()
