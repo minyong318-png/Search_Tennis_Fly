@@ -197,11 +197,22 @@ def parse_gytennis_slots(html: str) -> Dict[str, List[dict]]:
 
 def fetch_gytennis_day(session: requests.Session, courtvalue: int, ymd: str) -> Dict[str, List[dict]]:
     url = f"{GYT_BASE}/{courtvalue}/{ymd}"
-    r = session.get(
-        url,
-        timeout=20,
-        headers={"User-Agent": UA, "Accept": "text/html,application/xhtml+xml"},
-    )
+    try:
+        r = session.get(
+            url,
+            timeout=20,
+            headers={"User-Agent": UA, "Accept": "text/html,application/xhtml+xml"},
+        )
+    except requests.exceptions.SSLError as e:
+        # gytennis 측 인증서 체인 이슈가 간헐적으로 발생해 CI에서 실패할 수 있음.
+        # 기본은 SSL 검증을 유지하고, 해당 예외일 때만 1회 verify=False로 재시도.
+        print(f"[GYT][SSL_WARN] verify failed, retry without verify: cv={courtvalue} date={ymd} err={e}")
+        r = session.get(
+            url,
+            timeout=20,
+            verify=False,
+            headers={"User-Agent": UA, "Accept": "text/html,application/xhtml+xml"},
+        )
     if r.status_code != 200:
         return {}
     html = fix_encoding(r)
