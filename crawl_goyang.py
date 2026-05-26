@@ -195,18 +195,27 @@ def parse_gytennis_slots(html: str) -> Dict[str, List[dict]]:
     return out
 
 
-def fetch_gytennis_day(session: requests.Session, courtvalue: int, ymd: str) -> Dict[str, List[dict]]:
+def fetch_gytennis_day(
+    session: requests.Session,
+    courtvalue: int,
+    ymd: str,
+    ssl_fallback_state: dict | None = None,
+) -> Dict[str, List[dict]]:
     url = f"{GYT_BASE}/{courtvalue}/{ymd}"
+    use_insecure = bool((ssl_fallback_state or {}).get("use_insecure"))
     try:
         r = session.get(
             url,
             timeout=20,
+            verify=(not use_insecure),
             headers={"User-Agent": UA, "Accept": "text/html,application/xhtml+xml"},
         )
     except requests.exceptions.SSLError as e:
-        # gytennis 측 인증서 체인 이슈가 간헐적으로 발생해 CI에서 실패할 수 있음.
-        # 기본은 SSL 검증을 유지하고, 해당 예외일 때만 1회 verify=False로 재시도.
-        print(f"[GYT][SSL_WARN] verify failed, retry without verify: cv={courtvalue} date={ymd} err={e}")
+        # 첫 SSL 실패 이후에는 나머지 gytennis 요청도 verify=False로 전환해
+        # 동일 경고가 수백 번 반복되는 것을 막는다.
+        if ssl_fallback_state is not None:
+            ssl_fallback_state["use_insecure"] = True
+        print(f"[GYT][SSL_WARN] switch to verify=False for gytennis session: first_fail cv={courtvalue} date={ymd} err={e}")
         r = session.get(
             url,
             timeout=20,
@@ -229,6 +238,7 @@ def crawl_gytennis() -> dict:
     print(f"[GYT] KST now={now:%Y-%m-%d %H:%M} cutoffPassed={cutoff_passed} dates={len(dates)}")
 
     s = make_session()
+    ssl_fallback_state = {"use_insecure": False}
 
     facilities: Dict[str, dict] = {}
     availability: Dict[str, Dict[str, List[dict]]] = {}
@@ -241,7 +251,7 @@ def crawl_gytennis() -> dict:
     for ymd in dates:
         for cv in range(1, 11):
             fid = f"gy-gytennis-{cv}"
-            court_slots = fetch_gytennis_day(s, cv, ymd)  # {"1":[...], "2":[...]}
+            court_slots = fetch_gytennis_day(s, cv, ymd, ssl_fallback_state)  # {"1":[...], "2":[...]}
             if not court_slots:
                 continue
             # flat list로 합치기
