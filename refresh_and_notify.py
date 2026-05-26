@@ -466,9 +466,10 @@ def clear_availability_cache_for_target(
         extra_guard = ""
         if keep_yongin_today:
             # 용인 당일 데이터는 전날 말미(23:59 근접) 스냅샷을 유지한다.
-            extra_guard = " and not (facility_id like 'yongin:%' and date_ymd = %s)"
+            extra_guard = " and not (facility_id like %s and date_ymd = %s)"
         params = [d1, d2, *prefixes]
         if keep_yongin_today:
+            params.append("yongin:%")
             params.append(today_d)
         cur.execute(
             f"""
