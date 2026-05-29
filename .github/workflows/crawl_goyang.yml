@@ -43,5 +43,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: gytennis-debug-goyang
-          path: Serch_Tennis_Fly/debug/gytennis
+          path: debug/gytennis
           if-no-files-found: ignore
