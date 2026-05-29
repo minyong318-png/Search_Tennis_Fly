@@ -317,6 +317,37 @@ def crawl_gytennis() -> dict:
             print(f"[GYT][ERR] cv={cv} date={ymd} err={e}")
             return cv, ymd, "fail", []
 
+    def _probe_session(sample_size: int = 5) -> bool:
+        # 초기 샘플이 전부 empty면 현재 세션/환경이 막힌 상태로 판단
+        checked = 0
+        ok_found = 0
+        for ymd in dates[: min(len(dates), 3)]:
+            for cv in range(1, 11):
+                checked += 1
+                try:
+                    court_slots = fetch_gytennis_day(s, cv, ymd, ssl_fallback_state)
+                    flat_count = sum(len(v) for v in court_slots.values()) if court_slots else 0
+                    if flat_count > 0:
+                        ok_found += 1
+                        return True
+                except Exception as e:
+                    print(f"[GYT][PROBE_ERR] cv={cv} date={ymd} err={e}")
+                if checked >= sample_size:
+                    return ok_found > 0
+        return ok_found > 0
+
+    probe_ok = _probe_session(sample_size=6)
+    if not probe_ok:
+        print("[GYT][EARLY_ABORT] probe detected all-empty pattern; retry with new session")
+        s = make_session()
+        ssl_fallback_state = {"use_insecure": False}
+        warmup_gytennis_session(s, ssl_fallback_state)
+        probe_ok = _probe_session(sample_size=8)
+        if not probe_ok:
+            print("[GYT][EARLY_ABORT] probe failed again; skip full gytennis crawl for this run")
+            print(f"[GYT][STATS] total={stats['total']} ok={stats['ok']} empty={stats['empty']} fail={stats['fail']}")
+            return {"facilities": facilities, "availability": availability}
+
     futures = []
     with ThreadPoolExecutor(max_workers=6) as ex:
         for ymd in dates:
