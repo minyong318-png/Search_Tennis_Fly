@@ -186,122 +186,124 @@ def fetch_gytennis_day(
     url_alt = f"{GYT_BASE}/{courtvalue}/{ymd.replace('-', '')}"
     base_court_url = f"{GYT_BASE}/{courtvalue}"
     use_insecure = bool((ssl_fallback_state or {}).get("use_insecure"))
-
     prefer_curl = (os.getenv("GYT_USE_CURL_CFFI") or "0").strip() == "1"
 
-    def _req(u: str, insecure: bool) -> requests.Response:
+    req_headers = {
+        "User-Agent": UA,
+        "Accept": "text/html,application/xhtml+xml",
+        "Referer": "https://www.gytennis.or.kr/daily",
+    }
+
+    def _get(u: str, insecure: bool):
         if prefer_curl and curl_requests is not None:
-            return curl_requests.get(
+            return curl_requests.get(u, timeout=20, verify=(not insecure), impersonate="chrome", headers=req_headers)
+        return session.get(u, timeout=20, verify=(not insecure), headers=req_headers)
+
+    def _post(u: str, data: dict, insecure: bool):
+        if prefer_curl and curl_requests is not None:
+            return curl_requests.post(
                 u,
+                data=data,
                 timeout=20,
                 verify=(not insecure),
                 impersonate="chrome",
-                headers={
-                    "User-Agent": UA,
-                    "Accept": "text/html,application/xhtml+xml",
-                    "Referer": "https://www.gytennis.or.kr/daily",
-                },
+                headers={**req_headers, "Referer": u},
             )
-        return session.get(
-            u,
-            timeout=20,
-            verify=(not insecure),
-            headers={
-                "User-Agent": UA,
-                "Accept": "text/html,application/xhtml+xml",
-                "Referer": "https://www.gytennis.or.kr/daily",
-            },
-        )
+        return session.post(u, data=data, timeout=20, verify=(not insecure), headers={**req_headers, "Referer": u})
+
+    def _valid_slots_html(h: str) -> bool:
+        if not h:
+            return False
+        if "location.replace('https://www.gytennis.or.kr')" in h:
+            return False
+        soup = BeautifulSoup(h, "lxml")
+        return bool(soup.select("table.custom") and soup.select("table.innerCustom"))
+
+    def _fetch_via_form(insecure: bool):
+        # ?? ?? ??: ?? ??? GET -> hidden ? ?? -> POST(cvalue/cdate/van_code)
+        r0 = _get(base_court_url, insecure)
+        if r0.status_code != 200:
+            return r0
+        html0 = fix_encoding(r0)
+        soup = BeautifulSoup(html0, "lxml")
+        payload: Dict[str, str] = {}
+        for inp in soup.select("form input[name]"):
+            name = inp.get("name")
+            if not name:
+                continue
+            t = (inp.get("type") or "").lower()
+            if t in ("checkbox", "radio"):
+                continue
+            if name.endswith("[]"):
+                continue
+            payload[name] = inp.get("value", "")
+        payload["cvalue"] = str(courtvalue)
+        payload["cdate"] = ymd
+        return _post(base_court_url, payload, insecure)
 
     try:
-        # 일부 환경(특히 CI)에서는 코트 기본 페이지 선접속이 없으면 날짜 페이지가 비정상 응답될 수 있다.
-        _req(base_court_url, use_insecure)
-        r = _req(url, use_insecure)
+        r = _fetch_via_form(use_insecure)
     except requests.exceptions.SSLError as e:
         if ssl_fallback_state is not None:
             ssl_fallback_state["use_insecure"] = True
         print(f"[GYT][SSL_WARN] switch to verify=False for gytennis session: first_fail cv={courtvalue} date={ymd} err={e}")
-        _req(base_court_url, True)
-        r = _req(url, True)
-    # requests 경로에서 비정상 상태가 뜨고 curl_cffi가 사용 가능하면 1회 우회 재시도
-    if r.status_code != 200 and (not prefer_curl) and curl_requests is not None:
-        try:
-            r = curl_requests.get(
-                url,
-                timeout=20,
-                verify=(not bool((ssl_fallback_state or {}).get("use_insecure"))),
-                impersonate="chrome",
-                headers={
-                    "User-Agent": UA,
-                    "Accept": "text/html,application/xhtml+xml",
-                    "Referer": "https://www.gytennis.or.kr/daily",
-                },
-            )
-            if r.status_code == 200:
-                print(f"[GYT][CURL_FALLBACK] cv={courtvalue} date={ymd} recovered status=200")
-        except Exception as e:
-            print(f"[GYT][CURL_FALLBACK_WARN] cv={courtvalue} date={ymd} err={e}")
+        r = _fetch_via_form(True)
 
-    if r.status_code != 200:
-        return {}
-    html = fix_encoding(r)
-    # 일부 케이스에서 바로 daily URL 진입 시 홈 리다이렉트 스크립트만 내려준다.
-    if "location.replace('https://www.gytennis.or.kr')" in html:
-        # 코트 기본 페이지를 다시 밟고 1회 재시도
+    html = fix_encoding(r) if r.status_code == 200 else ""
+    if r.status_code != 200 or not _valid_slots_html(html):
+        # fallback 1: ?? URL GET
         try:
-            session.get(
-                base_court_url,
-                timeout=20,
-                verify=(not bool((ssl_fallback_state or {}).get("use_insecure"))),
-                headers={
-                    "User-Agent": UA,
-                    "Accept": "text/html,application/xhtml+xml",
-                    "Referer": "https://www.gytennis.or.kr/daily",
-                },
-            )
-            r2 = session.get(
-                url,
-                timeout=20,
-                verify=(not bool((ssl_fallback_state or {}).get("use_insecure"))),
-                headers={
-                    "User-Agent": UA,
-                    "Accept": "text/html,application/xhtml+xml",
-                    "Referer": "https://www.gytennis.or.kr/daily",
-                },
-            )
-            if r2.status_code == 200:
-                html2 = fix_encoding(r2)
-                if "location.replace('https://www.gytennis.or.kr')" not in html2:
-                    html = html2
-                else:
-                    # 날짜 표현이 다른 경우(YYYYMMDD) fallback
-                    r3 = _req(url_alt, bool((ssl_fallback_state or {}).get("use_insecure")))
-                    if r3.status_code != 200:
-                        return {}
-                    html3 = fix_encoding(r3)
-                    if "location.replace('https://www.gytennis.or.kr')" in html3:
-                        return {}
-                    html = html3
+            r2 = _get(url, bool((ssl_fallback_state or {}).get("use_insecure")))
+            html2 = fix_encoding(r2) if r2.status_code == 200 else ""
+            if r2.status_code == 200 and _valid_slots_html(html2):
+                html = html2
             else:
-                return {}
+                # fallback 2: compact ?? URL
+                r3 = _get(url_alt, bool((ssl_fallback_state or {}).get("use_insecure")))
+                html3 = fix_encoding(r3) if r3.status_code == 200 else ""
+                if r3.status_code == 200 and _valid_slots_html(html3):
+                    html = html3
+                else:
+                    return {}
         except requests.exceptions.SSLError:
             if ssl_fallback_state is not None:
                 ssl_fallback_state["use_insecure"] = True
-            r2 = _req(url, True)
-            if r2.status_code != 200:
-                return {}
-            html2 = fix_encoding(r2)
-            if "location.replace('https://www.gytennis.or.kr')" in html2:
-                r3 = _req(url_alt, True)
-                if r3.status_code != 200:
-                    return {}
-                html3 = fix_encoding(r3)
-                if "location.replace('https://www.gytennis.or.kr')" in html3:
-                    return {}
-                html = html3
-            else:
+            r2 = _get(url, True)
+            html2 = fix_encoding(r2) if r2.status_code == 200 else ""
+            if r2.status_code == 200 and _valid_slots_html(html2):
                 html = html2
-    return parse_gytennis_slots(html)
+            else:
+                r3 = _get(url_alt, True)
+                html3 = fix_encoding(r3) if r3.status_code == 200 else ""
+                if r3.status_code == 200 and _valid_slots_html(html3):
+                    html = html3
+                else:
+                    return {}
+
+    parsed = parse_gytennis_slots(html)
+    best = parsed
+    best_count = sum(len(v) for v in best.values()) if best else 0
+
+    # 폼 응답과 URL 조회 결과를 비교해 더 많은 슬롯을 채택
+    for u in (url, url_alt):
+        try:
+            rr = _get(u, bool((ssl_fallback_state or {}).get("use_insecure")))
+        except requests.exceptions.SSLError:
+            if ssl_fallback_state is not None:
+                ssl_fallback_state["use_insecure"] = True
+            rr = _get(u, True)
+        if rr.status_code != 200:
+            continue
+        hh = fix_encoding(rr)
+        if not _valid_slots_html(hh):
+            continue
+        parsed2 = parse_gytennis_slots(hh)
+        cnt2 = sum(len(v) for v in parsed2.values()) if parsed2 else 0
+        if cnt2 > best_count:
+            best = parsed2
+            best_count = cnt2
+
+    return best
 
 
 def warmup_gytennis_session(session: requests.Session, ssl_fallback_state: dict) -> None:
