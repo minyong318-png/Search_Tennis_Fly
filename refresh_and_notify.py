@@ -737,6 +737,16 @@ def compute_minmax_yyyymmdd(availability: Dict[str, Dict[str, List[Any]]]) -> Tu
         return None
     ys.sort()
     return ys[0], ys[-1]
+
+
+def count_slots_for_prefix(availability: Dict[str, Dict[str, List[Any]]], prefix: str) -> int:
+    total = 0
+    for fid, day_map in (availability or {}).items():
+        if not str(fid).startswith(prefix):
+            continue
+        for slots in (day_map or {}).values():
+            total += len(slots or [])
+    return total
 # =========================================================
 # Push
 # =========================================================
@@ -783,28 +793,46 @@ def main() -> None:
 
         # ✅ 이번 실행 타겟/기간에 해당하는 캐시를 먼저 비워두고(빈 배열),
         #    아래 upsert에서 다시 채운다.
+        goyang_slots = count_slots_for_prefix(availability, "goyang:gytennis:")
+        protect_goyang_cache = target in ("all", "goyang") and goyang_slots == 0
+        if protect_goyang_cache:
+            print("[GOYANG][SAFEGUARD] gytennis slots=0; keep existing goyang cache")
+
+        facilities_for_write = facilities
+        availability_for_write = availability
+        clear_target = target
+        if protect_goyang_cache:
+            if target == "all":
+                clear_target = "yongin"
+                facilities_for_write = {k: v for k, v in facilities.items() if not str(k).startswith("goyang:")}
+                availability_for_write = {k: v for k, v in availability.items() if not str(k).startswith("goyang:")}
+            else:
+                clear_target = ""
+                facilities_for_write = {}
+                availability_for_write = {}
+
         mm = compute_minmax_yyyymmdd(availability)
         if mm:
             start_ymd, end_ymd = mm
-            print(f"[CACHE] clear target={target} range={start_ymd}~{end_ymd}")
+            print(f"[CACHE] clear target={clear_target or '(skip)'} range={start_ymd}~{end_ymd}")
             clear_availability_cache_for_target(
                 conn,
-                target,
+                clear_target,
                 start_ymd,
                 end_ymd,
-                keep_yongin_today=(target in ("all", "yongin")),
+                keep_yongin_today=(clear_target in ("all", "yongin")),
             )
         else:
             print("[CACHE] skip clear: no dates in availability")
 
         # 2) 프론트용 저장 (시설/availability_cache)
         try:
-            upsert_facilities_for_frontend(conn, facilities)
+            upsert_facilities_for_frontend(conn, facilities_for_write)
             upsert_availability_cache_for_frontend(
                 conn,
-                facilities,
-                availability,
-                keep_yongin_today=(target in ("all", "yongin")),
+                facilities_for_write,
+                availability_for_write,
+                keep_yongin_today=(clear_target in ("all", "yongin")),
             )
         except Exception as e:
             # 프론트용 저장이 실패해도 알림은 계속 수행할 수 있게 한다
