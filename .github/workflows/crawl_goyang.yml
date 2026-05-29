@@ -1,10 +1,7 @@
-name: Crawl Goyang & Notify
+﻿name: Crawl Goyang & Notify
 
 on:
   workflow_dispatch:
-  # 필요하면 cron도 따로
-  # schedule:
-  #   - cron: "*/10 * * * *"  # 고양은 조금 덜 자주도 OK
 
 jobs:
   run:
@@ -32,12 +29,19 @@ jobs:
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           RUN_TARGET: "goyang"
-          # daehwa 로그인용
+          GYT_DEBUG_DUMP: "1"
           GYS_ID: ${{ secrets.GYS_ID }}
           GYS_PW: ${{ secrets.GYS_PW }}
-          # push
           VAPID_PUBLIC_KEY: ${{ secrets.VAPID_PUBLIC_KEY }}
           VAPID_PRIVATE_KEY: ${{ secrets.VAPID_PRIVATE_KEY }}
           VAPID_SUBJECT: ${{ secrets.VAPID_SUBJECT }}
         run: |
           python refresh_and_notify.py
+
+      - name: Upload gytennis debug artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gytennis-debug-goyang
+          path: Serch_Tennis_Fly/debug/gytennis
+          if-no-files-found: ignore

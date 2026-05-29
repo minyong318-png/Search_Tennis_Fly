@@ -4,6 +4,7 @@ import json
 import calendar
 import datetime as dt
 import threading
+from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, Tuple
 from urllib.parse import urljoin
@@ -301,6 +302,51 @@ def crawl_gytennis() -> dict:
         availability[fid] = {}
 
     stats = {"total": 0, "ok": 0, "empty": 0, "fail": 0}
+    debug_dump = (os.getenv("GYT_DEBUG_DUMP") or "0").strip() == "1"
+
+    def _dump_gyt_debug_samples(tag: str, sample_dates: List[str]) -> None:
+        if not debug_dump:
+            return
+        out_dir = Path("debug") / "gytennis"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        summary_lines = [f"tag={tag}", f"ts={kst_now().isoformat()}"]
+        for cv in (1, 2):
+            for ymd in sample_dates[:2]:
+                url = f"{GYT_BASE}/{cv}/{ymd}"
+                try:
+                    use_insecure = bool(ssl_fallback_state.get("use_insecure"))
+                    r = s.get(
+                        url,
+                        timeout=20,
+                        verify=(not use_insecure),
+                        headers={
+                            "User-Agent": UA,
+                            "Accept": "text/html,application/xhtml+xml",
+                            "Referer": "https://www.gytennis.or.kr/daily",
+                        },
+                    )
+                except requests.exceptions.SSLError:
+                    ssl_fallback_state["use_insecure"] = True
+                    r = s.get(
+                        url,
+                        timeout=20,
+                        verify=False,
+                        headers={
+                            "User-Agent": UA,
+                            "Accept": "text/html,application/xhtml+xml",
+                            "Referer": "https://www.gytennis.or.kr/daily",
+                        },
+                    )
+                html = fix_encoding(r)
+                soup = BeautifulSoup(html, "lxml")
+                enabled = len(soup.select('td.resTag input[type="checkbox"]:not([disabled])'))
+                has_redirect = "location.replace('https://www.gytennis.or.kr')" in html
+                name = f"{tag}_cv{cv}_{ymd}.html"
+                (out_dir / name).write_text(html, encoding="utf-8")
+                summary_lines.append(
+                    f"{name} status={r.status_code} len={len(html)} enabled={enabled} redirect_script={has_redirect}"
+                )
+        (out_dir / f"{tag}_summary.txt").write_text("\n".join(summary_lines) + "\n", encoding="utf-8")
 
     def _task(cv: int, ymd: str) -> Tuple[int, str, str, List[dict]]:
         try:
@@ -338,12 +384,14 @@ def crawl_gytennis() -> dict:
 
     probe_ok = _probe_session(sample_size=6)
     if not probe_ok:
+        _dump_gyt_debug_samples("probe_fail_1", dates)
         print("[GYT][EARLY_ABORT] probe detected all-empty pattern; retry with new session")
         s = make_session()
         ssl_fallback_state = {"use_insecure": False}
         warmup_gytennis_session(s, ssl_fallback_state)
         probe_ok = _probe_session(sample_size=8)
         if not probe_ok:
+            _dump_gyt_debug_samples("probe_fail_2", dates)
             print("[GYT][EARLY_ABORT] probe failed again; skip full gytennis crawl for this run")
             print(f"[GYT][STATS] total={stats['total']} ok={stats['ok']} empty={stats['empty']} fail={stats['fail']}")
             return {"facilities": facilities, "availability": availability}
