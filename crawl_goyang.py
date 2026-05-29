@@ -16,7 +16,11 @@ from urllib3.util.retry import Retry
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-UA = "Mozilla/5.0 (compatible; GoyangCombinedCrawler/1.0)"
+UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/137.0.0.0 Safari/537.36"
+)
 TIME_RE = re.compile(r"(\d{1,2}:\d{2})\s*[~\-]\s*(\d{1,2}:\d{2})")
 
 KST = dt.timezone(dt.timedelta(hours=9))
@@ -177,8 +181,20 @@ def fetch_gytennis_day(
     ssl_fallback_state: dict | None = None,
 ) -> Dict[str, List[dict]]:
     url = f"{GYT_BASE}/{courtvalue}/{ymd}"
+    base_court_url = f"{GYT_BASE}/{courtvalue}"
     use_insecure = bool((ssl_fallback_state or {}).get("use_insecure"))
     try:
+        # 일부 환경(특히 CI)에서는 코트 기본 페이지 선접속이 없으면 날짜 페이지가 비정상 응답될 수 있다.
+        session.get(
+            base_court_url,
+            timeout=20,
+            verify=(not use_insecure),
+            headers={
+                "User-Agent": UA,
+                "Accept": "text/html,application/xhtml+xml",
+                "Referer": "https://www.gytennis.or.kr/daily",
+            },
+        )
         r = session.get(
             url,
             timeout=20,
@@ -193,6 +209,16 @@ def fetch_gytennis_day(
         if ssl_fallback_state is not None:
             ssl_fallback_state["use_insecure"] = True
         print(f"[GYT][SSL_WARN] switch to verify=False for gytennis session: first_fail cv={courtvalue} date={ymd} err={e}")
+        session.get(
+            base_court_url,
+            timeout=20,
+            verify=False,
+            headers={
+                "User-Agent": UA,
+                "Accept": "text/html,application/xhtml+xml",
+                "Referer": "https://www.gytennis.or.kr/daily",
+            },
+        )
         r = session.get(
             url,
             timeout=20,
@@ -208,7 +234,55 @@ def fetch_gytennis_day(
     html = fix_encoding(r)
     # 일부 케이스에서 바로 daily URL 진입 시 홈 리다이렉트 스크립트만 내려준다.
     if "location.replace('https://www.gytennis.or.kr')" in html:
-        return {}
+        # 코트 기본 페이지를 다시 밟고 1회 재시도
+        try:
+            session.get(
+                base_court_url,
+                timeout=20,
+                verify=(not bool((ssl_fallback_state or {}).get("use_insecure"))),
+                headers={
+                    "User-Agent": UA,
+                    "Accept": "text/html,application/xhtml+xml",
+                    "Referer": "https://www.gytennis.or.kr/daily",
+                },
+            )
+            r2 = session.get(
+                url,
+                timeout=20,
+                verify=(not bool((ssl_fallback_state or {}).get("use_insecure"))),
+                headers={
+                    "User-Agent": UA,
+                    "Accept": "text/html,application/xhtml+xml",
+                    "Referer": "https://www.gytennis.or.kr/daily",
+                },
+            )
+            if r2.status_code == 200:
+                html2 = fix_encoding(r2)
+                if "location.replace('https://www.gytennis.or.kr')" not in html2:
+                    html = html2
+                else:
+                    return {}
+            else:
+                return {}
+        except requests.exceptions.SSLError:
+            if ssl_fallback_state is not None:
+                ssl_fallback_state["use_insecure"] = True
+            r2 = session.get(
+                url,
+                timeout=20,
+                verify=False,
+                headers={
+                    "User-Agent": UA,
+                    "Accept": "text/html,application/xhtml+xml",
+                    "Referer": "https://www.gytennis.or.kr/daily",
+                },
+            )
+            if r2.status_code != 200:
+                return {}
+            html2 = fix_encoding(r2)
+            if "location.replace('https://www.gytennis.or.kr')" in html2:
+                return {}
+            html = html2
     return parse_gytennis_slots(html)
 
 
