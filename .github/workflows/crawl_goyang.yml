@@ -5,7 +5,8 @@ on:
 
 jobs:
   run:
-    runs-on: ubuntu-latest
+    # gytennis 차단 이슈 회피를 위해 집 로컬망 self-hosted runner에서 실행
+    runs-on: [self-hosted, goyang-home]
     timeout-minutes: 10
 
     steps:
