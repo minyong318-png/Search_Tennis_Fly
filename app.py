@@ -11,6 +11,7 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 
 from tennis_core import run_all
+import refresh_and_notify
 
 
 
@@ -503,7 +504,9 @@ def safe_save(path, data):
 # 전체 크롤링 실행
 # =========================
 def crawl_all():
-    return run_all() 
+    # 앱 라우트(/data, /refresh)도 워커/액션과 동일한 통합 크롤러를 사용한다.
+    # refresh_and_notify.crawl_all()은 RUN_TARGET 기준으로 용인/고양/전체를 처리한다.
+    return refresh_and_notify.crawl_all()
 
 # =========================
 def make_reserve_link(resve_id):
