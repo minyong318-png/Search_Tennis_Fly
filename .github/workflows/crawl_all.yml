@@ -23,6 +23,11 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: Refresh Korean gov SSL pins
+        continue-on-error: true
+        working-directory: Serch_Tennis_Fly
+        run: python fetch_korea_gov_certs.py
+
       - name: Run refresh (All)
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
