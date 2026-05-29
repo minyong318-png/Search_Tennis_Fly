@@ -294,7 +294,12 @@ def warmup_gytennis_session(session: requests.Session, ssl_fallback_state: dict)
         except requests.exceptions.SSLError as e:
             ssl_fallback_state["use_insecure"] = True
             print(f"[GYT][SSL_WARN] switch to verify=False during warmup: url={url} err={e}")
-            session.get(url, timeout=20, verify=False, headers={"Referer": "https://www.gytennis.or.kr/"})
+            try:
+                session.get(url, timeout=20, verify=False, headers={"Referer": "https://www.gytennis.or.kr/"})
+            except requests.RequestException as e2:
+                print(f"[GYT][WARMUP_WARN] verify=False warmup failed: url={url} err={e2}")
+        except requests.RequestException as e:
+            print(f"[GYT][WARMUP_WARN] warmup failed: url={url} err={e}")
 
 
 def crawl_gytennis() -> dict:
