@@ -98,16 +98,16 @@ def fix_encoding(r: requests.Response) -> str:
 
 GYT_BASE = "https://www.gytennis.or.kr/daily"
 GYT_NAME = {
-    1: "Court 1",
-    2: "Court 2",
-    3: "Court 3",
-    4: "Court 4",
-    5: "Court 5",
-    6: "Court 6",
-    7: "Court 7",
-    8: "Court 8",
-    9: "Court 9",
-    10: "Court 10",
+    1: "대화코트",
+    2: "삼송유수지코트",
+    3: "성라코트",
+    4: "성사전천후코트",
+    5: "성사실외코트",
+    6: "중산코트",
+    7: "충장코트",
+    8: "킨텍스유수지코트",
+    9: "토당코트",
+    10: "화정코트",
 }
 
 
@@ -148,7 +148,9 @@ def parse_gytennis_slots(html: str) -> Dict[str, List[dict]]:
             if td.select_one("input[disabled]") is not None:
                 continue
 
-            avail_cb = td.select_one('input[name="isvkrr[]"]:not([disabled])')
+            # 사이트에서 예약 가능 체크박스 name이 수시로 바뀌므로
+            # disabled가 아닌 checkbox 기준으로 가용 슬롯을 판단한다.
+            avail_cb = td.select_one('input[type="checkbox"]:not([disabled])')
             if not avail_cb:
                 continue
 
@@ -181,7 +183,11 @@ def fetch_gytennis_day(
             url,
             timeout=20,
             verify=(not use_insecure),
-            headers={"User-Agent": UA, "Accept": "text/html,application/xhtml+xml"},
+            headers={
+                "User-Agent": UA,
+                "Accept": "text/html,application/xhtml+xml",
+                "Referer": "https://www.gytennis.or.kr/daily",
+            },
         )
     except requests.exceptions.SSLError as e:
         if ssl_fallback_state is not None:
@@ -191,12 +197,30 @@ def fetch_gytennis_day(
             url,
             timeout=20,
             verify=False,
-            headers={"User-Agent": UA, "Accept": "text/html,application/xhtml+xml"},
+            headers={
+                "User-Agent": UA,
+                "Accept": "text/html,application/xhtml+xml",
+                "Referer": "https://www.gytennis.or.kr/daily",
+            },
         )
     if r.status_code != 200:
         return {}
     html = fix_encoding(r)
+    # 일부 케이스에서 바로 daily URL 진입 시 홈 리다이렉트 스크립트만 내려준다.
+    if "location.replace('https://www.gytennis.or.kr')" in html:
+        return {}
     return parse_gytennis_slots(html)
+
+
+def warmup_gytennis_session(session: requests.Session, ssl_fallback_state: dict) -> None:
+    for url in ("https://www.gytennis.or.kr/", "https://www.gytennis.or.kr/daily"):
+        use_insecure = bool(ssl_fallback_state.get("use_insecure"))
+        try:
+            session.get(url, timeout=20, verify=(not use_insecure), headers={"Referer": "https://www.gytennis.or.kr/"})
+        except requests.exceptions.SSLError as e:
+            ssl_fallback_state["use_insecure"] = True
+            print(f"[GYT][SSL_WARN] switch to verify=False during warmup: url={url} err={e}")
+            session.get(url, timeout=20, verify=False, headers={"Referer": "https://www.gytennis.or.kr/"})
 
 
 def crawl_gytennis() -> dict:
@@ -206,6 +230,7 @@ def crawl_gytennis() -> dict:
 
     s = make_session()
     ssl_fallback_state = {"use_insecure": False}
+    warmup_gytennis_session(s, ssl_fallback_state)
 
     facilities: Dict[str, dict] = {}
     availability: Dict[str, Dict[str, List[dict]]] = {}
@@ -213,7 +238,7 @@ def crawl_gytennis() -> dict:
 
     for cv in range(1, 11):
         fid = f"gy-gytennis-{cv}"
-        facilities[fid] = {"title": f"Goyang Gytennis {GYT_NAME.get(cv, f'courtvalue {cv}')}", "location": "Goyang", "courtvalue": cv}
+        facilities[fid] = {"title": f"고양테니스협회 {GYT_NAME.get(cv, f'courtvalue {cv}')}", "location": "고양시", "courtvalue": cv}
         availability[fid] = {}
 
     stats = {"total": 0, "ok": 0, "empty": 0, "fail": 0}
@@ -468,7 +493,7 @@ def crawl_daehwa() -> dict:
     login_daehwa(s, ssl_fallback_state)
 
     facility_id = "gy-daehwa"
-    facilities = {facility_id: {"title": "Goyang Daehwa Tennis", "location": "Goyang"}}
+    facilities = {facility_id: {"title": "고양 대화 테니스장", "location": "고양시"}}
     availability: Dict[str, Dict[str, List[dict]]] = {facility_id: {}}
 
     stats = {"total": 0, "ok": 0, "empty": 0, "fail": 0}
