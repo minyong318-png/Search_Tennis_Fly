@@ -4,6 +4,7 @@ from datetime import datetime, date, timedelta, timezone
 from typing import Dict, List, Set, Tuple, Optional, Iterable, Any
 
 import psycopg
+import requests
 from psycopg.rows import dict_row
 from pywebpush import webpush, WebPushException
 
@@ -533,6 +534,80 @@ def upsert_availability_cache_for_frontend(
     conn.commit()
 
 
+def _chunks(items: List[dict], size: int = 500) -> Iterable[List[dict]]:
+    for i in range(0, len(items), size):
+        yield items[i:i + size]
+
+
+def sync_frontend_cache_to_supabase(
+    facilities: Dict[str, Any],
+    availability: Dict[str, Dict[str, List[Any]]],
+    keep_yongin_today: bool = False,
+) -> None:
+    sb_url = (os.getenv("SUPABASE_URL") or "").rstrip("/")
+    sb_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or ""
+    if not sb_url or not sb_key:
+        print("[SUPABASE] skipped: SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY missing")
+        return
+
+    ts_iso = utcnow().isoformat()
+    headers = {
+        "apikey": sb_key,
+        "Authorization": f"Bearer {sb_key}",
+        "Content-Type": "application/json",
+        "Prefer": "resolution=merge-duplicates",
+    }
+
+    fac_rows: List[dict] = []
+    for fid, v in facilities.items():
+        fid = str(fid)
+        if isinstance(v, dict):
+            title = v.get("title") or v.get("name") or v.get("facility_name") or f"RID {fid}"
+            location = v.get("location") or ""
+        else:
+            title = str(v) if v is not None else f"RID {fid}"
+            location = ""
+        fac_rows.append({"facility_id": fid, "title": title, "location": location, "updated_at": ts_iso})
+
+    av_rows: List[dict] = []
+    today_ymd = kst_today_yyyymmdd()
+    for fid, day_map in availability.items():
+        fid = str(fid)
+        for ymd, slots in (day_map or {}).items():
+            ymd = (ymd or "").strip()
+            if len(ymd) != 8:
+                continue
+            if keep_yongin_today and fid.startswith("yongin:") and ymd == today_ymd:
+                continue
+            d = yyyymmdd_to_date(ymd).isoformat()
+            fallback_resve_id = _strip_yongin_resve_id(fid)
+            arr = [slot_obj_for_frontend(s, fallback_resve_id) for s in (slots or []) if slot_key_from_time(s)]
+            av_rows.append({"facility_id": fid, "date_ymd": d, "slots_json": arr, "updated_at": ts_iso})
+
+    with requests.Session() as s:
+        for batch in _chunks(fac_rows, 500):
+            r = s.post(
+                f"{sb_url}/rest/v1/facilities?on_conflict=facility_id",
+                headers=headers,
+                data=json.dumps(batch, ensure_ascii=False),
+                timeout=30,
+            )
+            if r.status_code >= 300:
+                raise RuntimeError(f"facilities upsert failed: {r.status_code} {r.text[:500]}")
+
+        for batch in _chunks(av_rows, 500):
+            r = s.post(
+                f"{sb_url}/rest/v1/availability_cache?on_conflict=facility_id,date_ymd",
+                headers=headers,
+                data=json.dumps(batch, ensure_ascii=False),
+                timeout=30,
+            )
+            if r.status_code >= 300:
+                raise RuntimeError(f"availability_cache upsert failed: {r.status_code} {r.text[:500]}")
+
+    print(f"[SUPABASE] synced facilities={len(fac_rows)} availability_rows={len(av_rows)}")
+
+
 # =========================================================
 # DB read (batch)
 # =========================================================
@@ -800,6 +875,11 @@ def main() -> None:
             upsert_facilities_for_frontend(conn, facilities)
             upsert_availability_cache_for_frontend(
                 conn,
+                facilities,
+                availability,
+                keep_yongin_today=(target in ("all", "yongin")),
+            )
+            sync_frontend_cache_to_supabase(
                 facilities,
                 availability,
                 keep_yongin_today=(target in ("all", "yongin")),

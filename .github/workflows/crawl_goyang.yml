@@ -31,6 +31,8 @@ jobs:
       - name: Run refresh (Goyang)
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           RUN_TARGET: "goyang"
           # daehwa 로그인용
           GYS_ID: ${{ secrets.GYS_ID }}
