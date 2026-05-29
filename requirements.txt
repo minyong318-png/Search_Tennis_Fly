@@ -5,6 +5,7 @@ gunicorn
 requests
 lxml
 aiohttp
+curl_cffi
 pywebpush
 cryptography
 psycopg2-binary

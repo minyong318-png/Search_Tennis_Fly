@@ -14,6 +14,10 @@ from bs4 import BeautifulSoup
 import urllib3
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+try:
+    from curl_cffi import requests as curl_requests
+except Exception:
+    curl_requests = None
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -183,7 +187,21 @@ def fetch_gytennis_day(
     base_court_url = f"{GYT_BASE}/{courtvalue}"
     use_insecure = bool((ssl_fallback_state or {}).get("use_insecure"))
 
+    prefer_curl = (os.getenv("GYT_USE_CURL_CFFI") or "0").strip() == "1"
+
     def _req(u: str, insecure: bool) -> requests.Response:
+        if prefer_curl and curl_requests is not None:
+            return curl_requests.get(
+                u,
+                timeout=20,
+                verify=(not insecure),
+                impersonate="chrome",
+                headers={
+                    "User-Agent": UA,
+                    "Accept": "text/html,application/xhtml+xml",
+                    "Referer": "https://www.gytennis.or.kr/daily",
+                },
+            )
         return session.get(
             u,
             timeout=20,
@@ -205,6 +223,25 @@ def fetch_gytennis_day(
         print(f"[GYT][SSL_WARN] switch to verify=False for gytennis session: first_fail cv={courtvalue} date={ymd} err={e}")
         _req(base_court_url, True)
         r = _req(url, True)
+    # requests 경로에서 비정상 상태가 뜨고 curl_cffi가 사용 가능하면 1회 우회 재시도
+    if r.status_code != 200 and (not prefer_curl) and curl_requests is not None:
+        try:
+            r = curl_requests.get(
+                url,
+                timeout=20,
+                verify=(not bool((ssl_fallback_state or {}).get("use_insecure"))),
+                impersonate="chrome",
+                headers={
+                    "User-Agent": UA,
+                    "Accept": "text/html,application/xhtml+xml",
+                    "Referer": "https://www.gytennis.or.kr/daily",
+                },
+            )
+            if r.status_code == 200:
+                print(f"[GYT][CURL_FALLBACK] cv={courtvalue} date={ymd} recovered status=200")
+        except Exception as e:
+            print(f"[GYT][CURL_FALLBACK_WARN] cv={courtvalue} date={ymd} err={e}")
+
     if r.status_code != 200:
         return {}
     html = fix_encoding(r)
