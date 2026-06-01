@@ -75,7 +75,10 @@ def get_court_group(title: str, facility_id: str = "") -> str:
     if str(facility_id).startswith("suwon:"):
         return f"수원|{base}"
     if str(facility_id).startswith("seongnam:"):
-        base = re.sub(r"\s*\d+\s*번\s*코트.*$", "", base).strip()
+        base = re.sub(r"\s*\([^)]*\)", "", base)
+        base = re.sub(r"\s*당일예약\s*", " ", base)
+        base = re.sub(r"\s*반쪽\s*코트.*$", "", base)
+        base = re.sub(r"\s*\d+\s*번?\s*코트.*$", "", base).strip()
         return f"성남|{base}"
     return base
 
