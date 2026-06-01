@@ -23,3 +23,4 @@ jobs:
           tailscale status
           curl --fail --silent --show-error --insecure --max-time 20 https://www.gytennis.or.kr/ > /dev/null
           python probe_gytennis_network.py
+          sudo tailscale set --exit-node=

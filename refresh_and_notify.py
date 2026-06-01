@@ -1,5 +1,6 @@
 import os
 import json
+import subprocess
 import time
 from datetime import datetime, date, timedelta, timezone
 from typing import Dict, List, Set, Tuple, Optional, Iterable, Any
@@ -29,6 +30,15 @@ def kst_today_yyyymmdd() -> str:
 def is_goyang_crawl_window() -> bool:
     now = datetime.now(KST)
     return 5 <= now.hour < 22
+
+
+def set_gytennis_exit_node(enabled: bool) -> None:
+    node = (os.getenv("GYT_TAILSCALE_EXIT_NODE") or "").strip()
+    if not node:
+        return
+    value = node if enabled else ""
+    subprocess.run(["sudo", "tailscale", "set", f"--exit-node={value}"], check=True)
+    print(f"[GYT][TAILSCALE] exit-node {'enabled' if enabled else 'disabled'}")
 
 
 def to_yyyymmdd(s: str) -> str:
@@ -257,7 +267,11 @@ def crawl_all() -> Tuple[Dict[str, Any], Dict[str, Dict[str, List[Any]]]]:
     # -----------------------------
     if target in ("all", "goyang") and is_goyang_crawl_window():
         started = time.perf_counter()
-        out_g1 = crawl_goyang.crawl_gytennis()
+        set_gytennis_exit_node(True)
+        try:
+            out_g1 = crawl_goyang.crawl_gytennis()
+        finally:
+            set_gytennis_exit_node(False)
         print(f"[GYT][ELAPSED] seconds={time.perf_counter() - started:.2f}")
 
         # ✅ daehwa는 로그인정보 없으면 스킵(실패로 전체 종료 방지)

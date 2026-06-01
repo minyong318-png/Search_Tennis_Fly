@@ -17,9 +17,6 @@ jobs:
           authkey: ${{ secrets.TAILSCALE_AUTHKEY }}
           ping: 100.120.193.30
 
-      - name: Route traffic through galaxy-s8
-        run: sudo tailscale set --exit-node=100.120.193.30
-
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -39,6 +36,7 @@ jobs:
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           RUN_TARGET: "goyang"
+          GYT_TAILSCALE_EXIT_NODE: "100.120.193.30"
           GYT_USE_CURL_CFFI: "1"
           GYT_DEBUG_DUMP: "1"
           GYT_PROXY_URL: ${{ secrets.GYT_PROXY_URL }}
