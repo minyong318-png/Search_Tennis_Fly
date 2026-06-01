@@ -422,11 +422,12 @@ def crawl_gytennis() -> dict:
             return cv, ymd, "fail", []
 
     def _probe_session(sample_size: int = 5) -> bool:
-        # 초기 샘플이 전부 empty면 현재 세션/환경이 막힌 상태로 판단
+        # 오늘 슬롯이 모두 찬 경우를 차단으로 오판하지 않도록 미래 날짜를 먼저 확인한다.
         checked = 0
         ok_found = 0
-        for ymd in dates[: min(len(dates), 3)]:
-            for cv in range(1, 11):
+        sample_dates = dates[1: min(len(dates), 4)] + dates[:1]
+        for cv in range(1, 11):
+            for ymd in sample_dates:
                 checked += 1
                 try:
                     court_slots = fetch_gytennis_day(s, cv, ymd, ssl_fallback_state)
