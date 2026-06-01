@@ -1,0 +1,15 @@
+name: Probe gytennis network
+
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Probe gytennis from GitHub runner
+        run: python probe_gytennis_network.py
