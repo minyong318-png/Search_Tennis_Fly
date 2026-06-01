@@ -236,6 +236,18 @@ def fetch_gytennis_day(
         soup = BeautifulSoup(h, "lxml")
         return bool(soup.select("table.custom") and soup.select("table.innerCustom"))
 
+    # Warmed requests.Session can fetch the date page directly. This avoids
+    # the slower form and compatibility fallbacks during normal operation.
+    try:
+        fast_r = session.get(url, timeout=20, verify=(not use_insecure), headers=req_headers)
+    except requests.exceptions.SSLError:
+        if ssl_fallback_state is not None:
+            ssl_fallback_state["use_insecure"] = True
+        fast_r = session.get(url, timeout=20, verify=False, headers=req_headers)
+    fast_html = fix_encoding(fast_r) if fast_r.status_code == 200 else ""
+    if fast_r.status_code == 200 and _valid_slots_html(fast_html):
+        return parse_gytennis_slots(fast_html)
+
     def _fetch_via_form(insecure: bool):
         # ?? ?? ??: ?? ??? GET -> hidden ? ?? -> POST(cvalue/cdate/van_code)
         r0 = _get(base_court_url, insecure)
