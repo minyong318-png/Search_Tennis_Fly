@@ -99,6 +99,14 @@ def make_session() -> requests.Session:
     return s
 
 
+def make_gytennis_session() -> requests.Session:
+    s = make_session()
+    proxy_url = (os.getenv("GYT_PROXY_URL") or "").strip()
+    if proxy_url:
+        s.proxies.update({"http": proxy_url, "https": proxy_url})
+    return s
+
+
 def fix_encoding(r: requests.Response) -> str:
     if not r.encoding or r.encoding.lower() in ("iso-8859-1", "ascii"):
         r.encoding = r.apparent_encoding or "utf-8"
@@ -187,6 +195,7 @@ def fetch_gytennis_day(
     base_court_url = f"{GYT_BASE}/{courtvalue}"
     use_insecure = bool((ssl_fallback_state or {}).get("use_insecure"))
     prefer_curl = (os.getenv("GYT_USE_CURL_CFFI") or "0").strip() == "1"
+    proxy_url = (os.getenv("GYT_PROXY_URL") or "").strip()
 
     req_headers = {
         "User-Agent": UA,
@@ -196,7 +205,14 @@ def fetch_gytennis_day(
 
     def _get(u: str, insecure: bool):
         if prefer_curl and curl_requests is not None:
-            return curl_requests.get(u, timeout=20, verify=(not insecure), impersonate="chrome", headers=req_headers)
+            return curl_requests.get(
+                u,
+                timeout=20,
+                verify=(not insecure),
+                impersonate="chrome",
+                headers=req_headers,
+                proxy=(proxy_url or None),
+            )
         return session.get(u, timeout=20, verify=(not insecure), headers=req_headers)
 
     def _post(u: str, data: dict, insecure: bool):
@@ -208,6 +224,7 @@ def fetch_gytennis_day(
                 verify=(not insecure),
                 impersonate="chrome",
                 headers={**req_headers, "Referer": u},
+                proxy=(proxy_url or None),
             )
         return session.post(u, data=data, timeout=20, verify=(not insecure), headers={**req_headers, "Referer": u})
 
@@ -327,7 +344,9 @@ def crawl_gytennis() -> dict:
     now = kst_now()
     print(f"[GYT] KST now={now:%Y-%m-%d %H:%M} cutoffPassed={cutoff_passed} dates={len(dates)}")
 
-    s = make_session()
+    proxy_url = (os.getenv("GYT_PROXY_URL") or "").strip()
+    print(f"[GYT][PROXY] {'enabled' if proxy_url else 'disabled'}")
+    s = make_gytennis_session()
     ssl_fallback_state = {"use_insecure": False}
     warmup_gytennis_session(s, ssl_fallback_state)
 
@@ -425,7 +444,7 @@ def crawl_gytennis() -> dict:
     if not probe_ok:
         _dump_gyt_debug_samples("probe_fail_1", dates)
         print("[GYT][EARLY_ABORT] probe detected all-empty pattern; retry with new session")
-        s = make_session()
+        s = make_gytennis_session()
         ssl_fallback_state = {"use_insecure": False}
         warmup_gytennis_session(s, ssl_fallback_state)
         probe_ok = _probe_session(sample_size=8)

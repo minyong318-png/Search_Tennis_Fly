@@ -31,6 +31,7 @@ jobs:
           RUN_TARGET: "goyang"
           GYT_USE_CURL_CFFI: "1"
           GYT_DEBUG_DUMP: "1"
+          GYT_PROXY_URL: ${{ secrets.GYT_PROXY_URL }}
           GYS_ID: ${{ secrets.GYS_ID }}
           GYS_PW: ${{ secrets.GYS_PW }}
           VAPID_PUBLIC_KEY: ${{ secrets.VAPID_PUBLIC_KEY }}
