@@ -1,5 +1,6 @@
 import os
 import json
+import time
 from datetime import datetime, date, timedelta, timezone
 from typing import Dict, List, Set, Tuple, Optional, Iterable, Any
 
@@ -255,11 +256,15 @@ def crawl_all() -> Tuple[Dict[str, Any], Dict[str, Dict[str, List[Any]]]]:
     # (B) 고양 (crawl_goyang)
     # -----------------------------
     if target in ("all", "goyang") and is_goyang_crawl_window():
+        started = time.perf_counter()
         out_g1 = crawl_goyang.crawl_gytennis()
+        print(f"[GYT][ELAPSED] seconds={time.perf_counter() - started:.2f}")
 
         # ✅ daehwa는 로그인정보 없으면 스킵(실패로 전체 종료 방지)
         try:
+            started = time.perf_counter()
             out_g2 = crawl_goyang.crawl_daehwa()
+            print(f"[DAEHWA][ELAPSED] seconds={time.perf_counter() - started:.2f}")
         except Exception as e:
             print("[DAEHWA] skipped:", e)
             out_g2 = {"facilities": {}, "availability": {}}

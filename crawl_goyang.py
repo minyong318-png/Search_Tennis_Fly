@@ -203,7 +203,16 @@ def fetch_gytennis_day(
         "Referer": "https://www.gytennis.or.kr/daily",
     }
 
+    def _count_request(method: str) -> None:
+        if ssl_fallback_state is None:
+            return
+        lock = ssl_fallback_state.setdefault("_request_lock", threading.Lock())
+        with lock:
+            key = f"_request_{method}"
+            ssl_fallback_state[key] = ssl_fallback_state.get(key, 0) + 1
+
     def _get(u: str, insecure: bool):
+        _count_request("get")
         if prefer_curl and curl_requests is not None:
             return curl_requests.get(
                 u,
@@ -216,6 +225,7 @@ def fetch_gytennis_day(
         return session.get(u, timeout=20, verify=(not insecure), headers=req_headers)
 
     def _post(u: str, data: dict, insecure: bool):
+        _count_request("post")
         if prefer_curl and curl_requests is not None:
             return curl_requests.post(
                 u,
@@ -235,18 +245,6 @@ def fetch_gytennis_day(
             return False
         soup = BeautifulSoup(h, "lxml")
         return bool(soup.select("table.custom") and soup.select("table.innerCustom"))
-
-    # Warmed requests.Session can fetch the date page directly. This avoids
-    # the slower form and compatibility fallbacks during normal operation.
-    try:
-        fast_r = session.get(url, timeout=20, verify=(not use_insecure), headers=req_headers)
-    except requests.exceptions.SSLError:
-        if ssl_fallback_state is not None:
-            ssl_fallback_state["use_insecure"] = True
-        fast_r = session.get(url, timeout=20, verify=False, headers=req_headers)
-    fast_html = fix_encoding(fast_r) if fast_r.status_code == 200 else ""
-    if fast_r.status_code == 200 and _valid_slots_html(fast_html):
-        return parse_gytennis_slots(fast_html)
 
     def _fetch_via_form(insecure: bool):
         # ?? ?? ??: ?? ??? GET -> hidden ? ?? -> POST(cvalue/cdate/van_code)
@@ -465,6 +463,10 @@ def crawl_gytennis() -> dict:
             _dump_gyt_debug_samples("probe_fail_2", dates)
             print("[GYT][EARLY_ABORT] probe failed again; skip full gytennis crawl for this run")
             print(f"[GYT][STATS] total={stats['total']} ok={stats['ok']} empty={stats['empty']} fail={stats['fail']}")
+            print(
+                f"[GYT][REQUESTS] get={ssl_fallback_state.get('_request_get', 0)} "
+                f"post={ssl_fallback_state.get('_request_post', 0)}"
+            )
             return {"facilities": facilities, "availability": availability}
 
     futures = []
@@ -487,6 +489,10 @@ def crawl_gytennis() -> dict:
                 stats["fail"] += 1
 
     print(f"[GYT][STATS] total={stats['total']} ok={stats['ok']} empty={stats['empty']} fail={stats['fail']}")
+    print(
+        f"[GYT][REQUESTS] get={ssl_fallback_state.get('_request_get', 0)} "
+        f"post={ssl_fallback_state.get('_request_post', 0)}"
+    )
 
     return {"facilities": facilities, "availability": availability}
 
