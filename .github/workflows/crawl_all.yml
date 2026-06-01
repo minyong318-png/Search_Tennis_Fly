@@ -3,6 +3,10 @@
 on:
   workflow_dispatch:
 
+concurrency:
+  group: isdc-seongnam-crawl
+  cancel-in-progress: false
+
 jobs:
   run:
     runs-on: ubuntu-latest

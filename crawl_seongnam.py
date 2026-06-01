@@ -45,8 +45,20 @@ def _login(session: requests.Session) -> bool:
     )
     response.raise_for_status()
     success = response.text.strip() == "success"
+    if success:
+        session.get(LIST_URL, timeout=20).raise_for_status()
     print(f"[SEONGNAM][AUTH] login={'ok' if success else 'fail'}")
     return success
+
+
+def _request(session: requests.Session, method: str, path: str, **kwargs) -> requests.Response:
+    response = session.request(method, f"{BASE_URL}/{path}", **kwargs)
+    if response.status_code == 404:
+        print(f"[SEONGNAM][AUTH] session expired path={path}; retry login")
+        if _login(session):
+            response = session.request(method, f"{BASE_URL}/{path}", **kwargs)
+    response.raise_for_status()
+    return response
 
 
 def _parse_timetable(html: str) -> list[dict]:
@@ -64,8 +76,7 @@ def _parse_timetable(html: str) -> list[dict]:
 
 
 def _crawl_court(session: requests.Session, fac_id: str) -> Dict[str, list]:
-    detail = session.post(f"{BASE_URL}/facilityInfo.do", data={"facId": fac_id}, timeout=20)
-    detail.raise_for_status()
+    detail = _request(session, "POST", "facilityInfo.do", data={"facId": fac_id}, timeout=20)
     soup = BeautifulSoup(detail.text, "lxml")
     day_input = soup.select_one("#outResDay")
     max_day = int(day_input.get("value", "2")) if day_input else 2
@@ -76,28 +87,31 @@ def _crawl_court(session: requests.Session, fac_id: str) -> Dict[str, list]:
         request_date = f"{current.year}-{current.month}-{current.day}"
         yyyymmdd = current.strftime("%Y%m%d")
         try:
-            closed = session.get(
-                f"{BASE_URL}/getClosedDayInfoByDate.do",
+            closed = _request(
+                session,
+                "GET",
+                "getClosedDayInfoByDate.do",
                 params={"facId": fac_id, "resdate": request_date},
                 timeout=20,
             )
-            closed.raise_for_status()
-            status = session.get(
-                f"{BASE_URL}/getReservationInfoByDate.do",
+            status = _request(
+                session,
+                "GET",
+                "getReservationInfoByDate.do",
                 params={"facId": fac_id, "resdate": request_date},
                 timeout=20,
             )
-            status.raise_for_status()
             if closed.text.strip() == "closed" or status.text.strip() in ("full", "empty", "closed"):
                 daymap[yyyymmdd] = []
                 continue
 
-            timetable = session.post(
-                f"{BASE_URL}/getTimeTableByDate.do",
+            timetable = _request(
+                session,
+                "POST",
+                "getTimeTableByDate.do",
                 data={"facId": fac_id, "resdate": request_date},
                 timeout=20,
             )
-            timetable.raise_for_status()
             daymap[yyyymmdd] = _parse_timetable(timetable.text)
         except Exception as exc:
             print(f"[SEONGNAM][WARN] court={fac_id} date={request_date} error={exc}")
