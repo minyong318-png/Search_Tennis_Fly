@@ -10,6 +10,16 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+
+      - name: Connect to Tailscale
+        uses: tailscale/github-action@v4
+        with:
+          authkey: ${{ secrets.TAILSCALE_AUTHKEY }}
+          ping: 100.120.193.30
+
+      - name: Route traffic through galaxy-s8
+        run: sudo tailscale set --exit-node=100.120.193.30
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
