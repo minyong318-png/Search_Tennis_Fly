@@ -34,13 +34,13 @@ def is_goyang_crawl_window() -> bool:
     return 5 <= now.hour < 22
 
 
-def set_gytennis_exit_node(enabled: bool) -> None:
-    node = (os.getenv("GYT_TAILSCALE_EXIT_NODE") or "").strip()
+def set_crawl_exit_node(scope: str, enabled: bool) -> None:
+    node = (os.getenv("CRAWL_TAILSCALE_EXIT_NODE") or os.getenv("GYT_TAILSCALE_EXIT_NODE") or "").strip()
     if not node:
         return
     value = node if enabled else ""
     subprocess.run(["sudo", "tailscale", "set", f"--exit-node={value}"], check=True)
-    print(f"[GYT][TAILSCALE] exit-node {'enabled' if enabled else 'disabled'}")
+    print(f"[{scope}][TAILSCALE] exit-node {'enabled' if enabled else 'disabled'}")
 
 
 def to_yyyymmdd(s: str) -> str:
@@ -279,11 +279,11 @@ def crawl_all() -> Tuple[Dict[str, Any], Dict[str, Dict[str, List[Any]]]]:
     # -----------------------------
     if target in ("all", "goyang") and is_goyang_crawl_window():
         started = time.perf_counter()
-        set_gytennis_exit_node(True)
+        set_crawl_exit_node("GYT", True)
         try:
             out_g1 = crawl_goyang.crawl_gytennis()
         finally:
-            set_gytennis_exit_node(False)
+            set_crawl_exit_node("GYT", False)
         print(f"[GYT][ELAPSED] seconds={time.perf_counter() - started:.2f}")
 
         # ✅ daehwa는 로그인정보 없으면 스킵(실패로 전체 종료 방지)
@@ -435,7 +435,11 @@ def crawl_all() -> Tuple[Dict[str, Any], Dict[str, Dict[str, List[Any]]]]:
     # (C) Suwon (Mangpo Sports Center)
     # -----------------------------
     if target in ("all", "suwon"):
-        out_s = crawl_suwon.crawl_suwon()
+        set_crawl_exit_node("SUWON", True)
+        try:
+            out_s = crawl_suwon.crawl_suwon()
+        finally:
+            set_crawl_exit_node("SUWON", False)
         for raw_fid, meta in (out_s.get("facilities") or {}).items():
             facilities[_ns_suwon_id(str(raw_fid))] = meta
         for raw_fid, daymap in (out_s.get("availability") or {}).items():
