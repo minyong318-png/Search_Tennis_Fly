@@ -1,0 +1,25 @@
+name: Probe gytennis through Tailscale
+
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Connect to Tailscale
+        uses: tailscale/github-action@v4
+        with:
+          authkey: ${{ secrets.TAILSCALE_AUTHKEY }}
+          ping: 100.120.193.30
+
+      - name: Route traffic through galaxy-s8
+        run: |
+          sudo tailscale set --exit-node=100.120.193.30
+          tailscale status
+          curl --fail --silent --show-error --insecure --max-time 20 https://www.gytennis.or.kr/ > /dev/null
+          python probe_gytennis_network.py
