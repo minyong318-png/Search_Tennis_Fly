@@ -75,6 +75,7 @@ def get_court_group(title: str, facility_id: str = "") -> str:
     if str(facility_id).startswith("suwon:"):
         return f"수원|{base}"
     if str(facility_id).startswith("seongnam:"):
+        base = re.sub(r"\s*\d+\s*번\s*코트.*$", "", base).strip()
         return f"성남|{base}"
     return base
 
@@ -866,10 +867,10 @@ def main() -> None:
         if protect_suwon_cache:
             print("[SUWON][SAFEGUARD] slots=0; keep existing suwon cache")
 
-        # The public Seongnam site exposes court names but requires login for its timetable.
-        protect_seongnam_cache = target in ("all", "seongnam")
+        seongnam_slots = count_slots_for_prefix(availability, "seongnam:")
+        protect_seongnam_cache = target in ("all", "seongnam") and seongnam_slots == 0
         if protect_seongnam_cache:
-            print("[SEONGNAM][SAFEGUARD] login required; keep existing seongnam cache")
+            print("[SEONGNAM][SAFEGUARD] slots=0; keep existing seongnam cache")
 
         facilities_for_write = facilities
         availability_for_write = availability

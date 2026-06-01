@@ -1,7 +1,10 @@
+import os
 import re
+from datetime import date, timedelta
 from typing import Any, Dict
 
 import requests
+from bs4 import BeautifulSoup
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
@@ -23,18 +26,98 @@ def _session() -> requests.Session:
     return session
 
 
+def _clean_text(value: str) -> str:
+    return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", value or "")).strip()
+
+
+def _login(session: requests.Session) -> bool:
+    user_id = (os.getenv("ISDC_ID") or "").strip()
+    password = os.getenv("ISDC_PW") or ""
+    if not user_id or not password:
+        print("[SEONGNAM][AUTH] credentials missing")
+        return False
+
+    session.get(f"{BASE_URL}/login.do", timeout=20).raise_for_status()
+    response = session.post(
+        f"{BASE_URL}/rest_loginCheck.do",
+        data={"web_id": user_id, "web_pw": password},
+        timeout=20,
+    )
+    response.raise_for_status()
+    success = response.text.strip() == "success"
+    print(f"[SEONGNAM][AUTH] login={'ok' if success else 'fail'}")
+    return success
+
+
+def _parse_timetable(html: str) -> list[dict]:
+    slots = []
+    soup = BeautifulSoup(html, "lxml")
+    for row in soup.select("tr"):
+        radio = row.select_one('input[name="rbTime"]')
+        cells = row.select("td")
+        if not radio or len(cells) < 3:
+            continue
+        time_content = cells[2].get_text(" ", strip=True)
+        if time_content:
+            slots.append({"timeContent": time_content, "reserveUrl": LIST_URL})
+    return slots
+
+
+def _crawl_court(session: requests.Session, fac_id: str) -> Dict[str, list]:
+    detail = session.post(f"{BASE_URL}/facilityInfo.do", data={"facId": fac_id}, timeout=20)
+    detail.raise_for_status()
+    soup = BeautifulSoup(detail.text, "lxml")
+    day_input = soup.select_one("#outResDay")
+    max_day = int(day_input.get("value", "2")) if day_input else 2
+
+    daymap: Dict[str, list] = {}
+    for offset in range(max_day + 1):
+        current = date.today() + timedelta(days=offset)
+        request_date = f"{current.year}-{current.month}-{current.day}"
+        yyyymmdd = current.strftime("%Y%m%d")
+        try:
+            closed = session.get(
+                f"{BASE_URL}/getClosedDayInfoByDate.do",
+                params={"facId": fac_id, "resdate": request_date},
+                timeout=20,
+            )
+            closed.raise_for_status()
+            status = session.get(
+                f"{BASE_URL}/getReservationInfoByDate.do",
+                params={"facId": fac_id, "resdate": request_date},
+                timeout=20,
+            )
+            status.raise_for_status()
+            if closed.text.strip() == "closed" or status.text.strip() in ("full", "empty", "closed"):
+                daymap[yyyymmdd] = []
+                continue
+
+            timetable = session.post(
+                f"{BASE_URL}/getTimeTableByDate.do",
+                data={"facId": fac_id, "resdate": request_date},
+                timeout=20,
+            )
+            timetable.raise_for_status()
+            daymap[yyyymmdd] = _parse_timetable(timetable.text)
+        except Exception as exc:
+            print(f"[SEONGNAM][WARN] court={fac_id} date={request_date} error={exc}")
+            daymap[yyyymmdd] = []
+    return daymap
+
+
 def crawl_seongnam() -> Dict[str, Any]:
     session = _session()
     facilities: Dict[str, dict] = {}
     availability: Dict[str, Dict[str, list]] = {}
     total = ok = empty = fail = 0
+    login_required = not _login(session)
 
     try:
         response = session.get(LIST_URL, timeout=20)
         response.raise_for_status()
         group_ids = sorted(set(re.findall(r'name=["\']groupId["\']\s+value=["\'](\d+)["\']', response.text)))
         group_titles = {
-            group_id: re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", title)).strip().replace("테니스장", "")
+            group_id: _clean_text(title).replace("테니스장", "")
             for group_id, title in re.findall(
                 r'name=["\']groupId["\']\s+value=["\'](\d+)["\'].*?'
                 r'<div\s+class=["\']head-area["\']>\s*(.*?)\s*</div>',
@@ -44,11 +127,10 @@ def crawl_seongnam() -> Dict[str, Any]:
         }
     except Exception as exc:
         print(f"[SEONGNAM][WARN] facility list error={exc}")
-        print("[SEONGNAM][STATS] total=0 ok=0 empty=0 fail=1 courts=0 login_required=1")
+        print("[SEONGNAM][STATS] total=0 ok=0 empty=0 fail=1 courts=0 slots=0 login_required=1")
         return {"facilities": {}, "availability": {}, "login_required": True}
 
     for group_id in group_ids:
-        total += 1
         try:
             response = session.post(f"{BASE_URL}/tennisList.do", data={"groupId": group_id}, timeout=20)
             response.raise_for_status()
@@ -58,12 +140,8 @@ def crawl_seongnam() -> Dict[str, Any]:
                 response.text,
                 re.I | re.S,
             )
-            if not items:
-                empty += 1
-                continue
-            ok += 1
             for fac_id, raw_title in items:
-                title = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", raw_title)).strip()
+                title = _clean_text(raw_title)
                 group_title = group_titles.get(group_id, "")
                 if group_title and not title.startswith(group_title):
                     title = f"{group_title} {title}"
@@ -71,23 +149,31 @@ def crawl_seongnam() -> Dict[str, Any]:
                     "title": title,
                     "location": "성남시",
                     "reserveUrl": LIST_URL,
-                    "availabilityStatus": "login_required",
+                    "availabilityStatus": "login_required" if login_required else "authenticated",
                 }
                 availability[fac_id] = {}
         except Exception as exc:
             fail += 1
             print(f"[SEONGNAM][WARN] group={group_id} error={exc}")
 
-    login_required = True
-    try:
-        check = session.post(f"{BASE_URL}/checkOpenTime_Tennis.do", timeout=20)
-        login_required = check.text.strip() == "session"
-    except Exception as exc:
-        print(f"[SEONGNAM][WARN] login check error={exc}")
+    if not login_required:
+        for fac_id in facilities:
+            total += 1
+            try:
+                daymap = _crawl_court(session, fac_id)
+                availability[fac_id] = daymap
+                if any(daymap.values()):
+                    ok += 1
+                else:
+                    empty += 1
+            except Exception as exc:
+                fail += 1
+                print(f"[SEONGNAM][WARN] court={fac_id} error={exc}")
 
+    slots = sum(len(items) for daymap in availability.values() for items in daymap.values())
     print(
         f"[SEONGNAM][STATS] total={total} ok={ok} empty={empty} fail={fail} "
-        f"courts={len(facilities)} login_required={int(login_required)}"
+        f"courts={len(facilities)} slots={slots} login_required={int(login_required)}"
     )
     if login_required:
         print("[SEONGNAM][INFO] public court list collected; availability requires login")
