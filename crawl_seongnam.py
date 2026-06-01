@@ -33,6 +33,15 @@ def crawl_seongnam() -> Dict[str, Any]:
         response = session.get(LIST_URL, timeout=20)
         response.raise_for_status()
         group_ids = sorted(set(re.findall(r'name=["\']groupId["\']\s+value=["\'](\d+)["\']', response.text)))
+        group_titles = {
+            group_id: re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", title)).strip().replace("테니스장", "")
+            for group_id, title in re.findall(
+                r'name=["\']groupId["\']\s+value=["\'](\d+)["\'].*?'
+                r'<div\s+class=["\']head-area["\']>\s*(.*?)\s*</div>',
+                response.text,
+                re.I | re.S,
+            )
+        }
     except Exception as exc:
         print(f"[SEONGNAM][WARN] facility list error={exc}")
         print("[SEONGNAM][STATS] total=0 ok=0 empty=0 fail=1 courts=0 login_required=1")
@@ -55,6 +64,9 @@ def crawl_seongnam() -> Dict[str, Any]:
             ok += 1
             for fac_id, raw_title in items:
                 title = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", raw_title)).strip()
+                group_title = group_titles.get(group_id, "")
+                if group_title and not title.startswith(group_title):
+                    title = f"{group_title} {title}"
                 facilities[fac_id] = {
                     "title": title,
                     "location": "성남시",
