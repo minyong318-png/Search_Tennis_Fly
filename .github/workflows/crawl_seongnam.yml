@@ -14,6 +14,13 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+
+      - name: Connect to Tailscale
+        uses: tailscale/github-action@v4
+        with:
+          authkey: ${{ secrets.TAILSCALE_AUTHKEY }}
+          ping: 100.120.193.30
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -28,6 +35,7 @@ jobs:
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           RUN_TARGET: "seongnam"
+          CRAWL_TAILSCALE_EXIT_NODE: "100.120.193.30"
           ISDC_ID: ${{ secrets.ISDC_ID }}
           ISDC_PW: ${{ secrets.ISDC_PW }}
           VAPID_PUBLIC_KEY: ${{ secrets.VAPID_PUBLIC_KEY }}

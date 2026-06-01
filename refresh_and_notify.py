@@ -453,7 +453,11 @@ def crawl_all() -> Tuple[Dict[str, Any], Dict[str, Dict[str, List[Any]]]]:
     # (D) Seongnam
     # -----------------------------
     if target in ("all", "seongnam"):
-        out_sn = crawl_seongnam.crawl_seongnam()
+        set_crawl_exit_node("SEONGNAM", True)
+        try:
+            out_sn = crawl_seongnam.crawl_seongnam()
+        finally:
+            set_crawl_exit_node("SEONGNAM", False)
         for raw_fid, meta in (out_sn.get("facilities") or {}).items():
             facilities[_ns_seongnam_id(str(raw_fid))] = meta
         for raw_fid, daymap in (out_sn.get("availability") or {}).items():

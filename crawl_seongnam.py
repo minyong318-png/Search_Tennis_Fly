@@ -37,13 +37,17 @@ def _login(session: requests.Session) -> bool:
         print("[SEONGNAM][AUTH] credentials missing")
         return False
 
-    session.get(f"{BASE_URL}/login.do", timeout=20).raise_for_status()
-    response = session.post(
-        f"{BASE_URL}/rest_loginCheck.do",
-        data={"web_id": user_id, "web_pw": password},
-        timeout=20,
-    )
-    response.raise_for_status()
+    try:
+        session.get(f"{BASE_URL}/login.do", timeout=20).raise_for_status()
+        response = session.post(
+            f"{BASE_URL}/rest_loginCheck.do",
+            data={"web_id": user_id, "web_pw": password},
+            timeout=20,
+        )
+        response.raise_for_status()
+    except requests.RequestException as exc:
+        print(f"[SEONGNAM][AUTH] login request failed error={exc}")
+        return False
     success = response.text.strip() == "success"
     if success:
         session.get(LIST_URL, timeout=20).raise_for_status()
