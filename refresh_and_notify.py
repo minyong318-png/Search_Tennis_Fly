@@ -11,6 +11,8 @@ from pywebpush import webpush, WebPushException
 
 import tennis_core
 import crawl_goyang
+import crawl_suwon
+import crawl_seongnam
 
 
 # =========================================================
@@ -70,6 +72,10 @@ def get_court_group(title: str, facility_id: str = "") -> str:
         return f"용인|{base}"
     if str(facility_id).startswith("goyang:"):
         return f"고양|{base}"
+    if str(facility_id).startswith("suwon:"):
+        return f"수원|{base}"
+    if str(facility_id).startswith("seongnam:"):
+        return f"성남|{base}"
     return base
 
 def slot_key_from_time(t: Any) -> str:
@@ -174,6 +180,12 @@ def _ns_yongin_id(rid: str) -> str:
 def _ns_goyang_id(kind: str, key: str) -> str:
     # kind: "gytennis" / "daehwa"
     return f"goyang:{kind}:{key}" if key else f"goyang:{kind}"
+
+def _ns_suwon_id(key: str) -> str:
+    return f"suwon:{key}"
+
+def _ns_seongnam_id(key: str) -> str:
+    return f"seongnam:{key}"
 
 def _strip_yongin_resve_id(fid: str) -> str:
     # yongin:123 -> 123 (프론트 예약 링크용)
@@ -419,6 +431,26 @@ def crawl_all() -> Tuple[Dict[str, Any], Dict[str, Dict[str, List[Any]]]]:
         now_kst = datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S")
         print(f"[GOYANG] skipped outside KST window (05:00~22:00): now={now_kst}")
 
+    # -----------------------------
+    # (C) Suwon (Mangpo Sports Center)
+    # -----------------------------
+    if target in ("all", "suwon"):
+        out_s = crawl_suwon.crawl_suwon()
+        for raw_fid, meta in (out_s.get("facilities") or {}).items():
+            facilities[_ns_suwon_id(str(raw_fid))] = meta
+        for raw_fid, daymap in (out_s.get("availability") or {}).items():
+            availability[_ns_suwon_id(str(raw_fid))] = daymap or {}
+
+    # -----------------------------
+    # (D) Seongnam
+    # -----------------------------
+    if target in ("all", "seongnam"):
+        out_sn = crawl_seongnam.crawl_seongnam()
+        for raw_fid, meta in (out_sn.get("facilities") or {}).items():
+            facilities[_ns_seongnam_id(str(raw_fid))] = meta
+        for raw_fid, daymap in (out_sn.get("availability") or {}).items():
+            availability[_ns_seongnam_id(str(raw_fid))] = daymap or {}
+
     return facilities, availability
 # =========================================================
 # DB write: facilities / availability_cache (프론트용)
@@ -457,11 +489,12 @@ def clear_availability_cache_for_target(
     start_yyyymmdd: str,
     end_yyyymmdd: str,
     keep_yongin_today: bool = False,
+    exclude_prefixes: Iterable[str] = (),
 ) -> None:
     """
     타겟별로 해당 기간의 availability_cache를 빈 배열로 초기화한다.
     - DELETE가 아니라 slots_json='[]'로 초기화 (충돌/외래키 안전)
-    - target: yongin | goyang | all
+    - target: yongin | goyang | suwon | seongnam | all
     """
     target = (target or "all").strip().lower()
 
@@ -470,6 +503,13 @@ def clear_availability_cache_for_target(
         prefixes.append("yongin:%")
     if target in ("all", "goyang"):
         prefixes.append("goyang:%")
+    if target in ("all", "suwon"):
+        prefixes.append("suwon:%")
+    if target in ("all", "seongnam"):
+        prefixes.append("seongnam:%")
+
+    excluded = tuple(str(prefix) for prefix in exclude_prefixes if prefix)
+    prefixes = [prefix for prefix in prefixes if not any(prefix.startswith(skip) for skip in excluded)]
 
     if not prefixes:
         return
@@ -817,18 +857,30 @@ def main() -> None:
         if protect_goyang_cache:
             print("[GOYANG][SAFEGUARD] gytennis slots=0; keep existing goyang cache")
 
+        suwon_slots = count_slots_for_prefix(availability, "suwon:")
+        protect_suwon_cache = target in ("all", "suwon") and suwon_slots == 0
+        if protect_suwon_cache:
+            print("[SUWON][SAFEGUARD] slots=0; keep existing suwon cache")
+
+        # The public Seongnam site exposes court names but requires login for its timetable.
+        protect_seongnam_cache = target in ("all", "seongnam")
+        if protect_seongnam_cache:
+            print("[SEONGNAM][SAFEGUARD] login required; keep existing seongnam cache")
+
         facilities_for_write = facilities
         availability_for_write = availability
         clear_target = target
         if protect_goyang_cache:
-            if target == "all":
-                clear_target = "yongin"
-                facilities_for_write = {k: v for k, v in facilities.items() if not str(k).startswith("goyang:")}
-                availability_for_write = {k: v for k, v in availability.items() if not str(k).startswith("goyang:")}
-            else:
-                clear_target = ""
-                facilities_for_write = {}
-                availability_for_write = {}
+            facilities_for_write = {k: v for k, v in facilities_for_write.items() if not str(k).startswith("goyang:")}
+            availability_for_write = {k: v for k, v in availability_for_write.items() if not str(k).startswith("goyang:")}
+
+        excluded_cache_prefixes = []
+        if protect_goyang_cache:
+            excluded_cache_prefixes.append("goyang:")
+        if protect_suwon_cache:
+            excluded_cache_prefixes.append("suwon:")
+        if protect_seongnam_cache:
+            excluded_cache_prefixes.append("seongnam:")
 
         mm = compute_minmax_yyyymmdd(availability)
         if mm:
@@ -840,6 +892,7 @@ def main() -> None:
                 start_ymd,
                 end_ymd,
                 keep_yongin_today=(clear_target in ("all", "yongin")),
+                exclude_prefixes=excluded_cache_prefixes,
             )
         else:
             print("[CACHE] skip clear: no dates in availability")
