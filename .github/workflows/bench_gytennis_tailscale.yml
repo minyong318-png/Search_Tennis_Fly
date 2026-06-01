@@ -1,0 +1,47 @@
+name: Benchmark gytennis through Tailscale
+
+on:
+  workflow_dispatch:
+
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Connect to Tailscale
+        uses: tailscale/github-action@v4
+        with:
+          authkey: ${{ secrets.TAILSCALE_AUTHKEY }}
+          ping: 100.120.193.30
+
+      - name: Route traffic through galaxy-s8
+        run: sudo tailscale set --exit-node=100.120.193.30
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install deps
+        run: pip install -r requirements.txt
+
+      - name: Benchmark gytennis crawl
+        env:
+          GYT_USE_CURL_CFFI: "1"
+        run: |
+          python - <<'PY'
+          import time
+          from crawl_goyang import crawl_gytennis
+
+          started = time.perf_counter()
+          data = crawl_gytennis()
+          slots = sum(
+              len(day_slots)
+              for by_date in data["availability"].values()
+              for day_slots in by_date.values()
+          )
+          print(f"[GYT][BENCH] elapsed={time.perf_counter() - started:.2f}s slots={slots}")
+          PY
