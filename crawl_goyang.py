@@ -7,7 +7,7 @@ import threading
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, Tuple
-from urllib.parse import urljoin
+from urllib.parse import quote, urljoin
 
 import requests
 from bs4 import BeautifulSoup
@@ -502,6 +502,10 @@ DAEHWA_LOGIN = DAEHWA_BASE + "/member/login.php?preURL=%2Frent%2Ftennis_rent.php
 DAEHWA_RENT = DAEHWA_BASE + "/rent/tennis_rent.php"
 DAEHWA_PLACE = {1: "2", 2: "7", 3: "8", 4: "9"}
 
+BAEKSEOK_BASE = "https://gbc.gys.or.kr:446"
+BAEKSEOK_RENT = BAEKSEOK_BASE + "/rent/tennis_rent.php"
+BAEKSEOK_PART_OPT = "07"
+
 
 def _daehwa_get(s: requests.Session, url: str, ssl_fallback_state: dict, **kwargs) -> requests.Response:
     use_insecure = bool(ssl_fallback_state.get("use_insecure"))
@@ -595,7 +599,7 @@ def login_daehwa(s: requests.Session, ssl_fallback_state: dict) -> None:
         raise RuntimeError("Daehwa login failed")
 
 
-def build_payload_daehwa(place_opt: str, yyyymmdd: str) -> Dict[str, str]:
+def build_payload_gys(place_opt: str, yyyymmdd: str, part_opt: str = "02") -> Dict[str, str]:
     y, m, d = yyyymmdd_parts(yyyymmdd)
     return {
         "rent_date": yyyymmdd,
@@ -633,7 +637,7 @@ def build_payload_daehwa(place_opt: str, yyyymmdd: str) -> Dict[str, str]:
         "nmonth": m,
         "nday": d,
         "myReserveInfo": "",
-        "part_opt": "02",
+        "part_opt": str(part_opt),
         "part_nm": "",
         "pay_opt": "",
         "account_no": "",
@@ -645,6 +649,10 @@ def build_payload_daehwa(place_opt: str, yyyymmdd: str) -> Dict[str, str]:
         "rent_gubun": "1001",
         "TotalPay": "0",
     }
+
+
+def build_payload_daehwa(place_opt: str, yyyymmdd: str) -> Dict[str, str]:
+    return build_payload_gys(place_opt, yyyymmdd, part_opt="02")
 
 
 def parse_slots_daehwa(html: str, summary_keyword: str = "이용신청 테이블") -> List[dict]:
@@ -750,6 +758,186 @@ def crawl_daehwa() -> dict:
     return {"facilities": facilities, "availability": availability}
 
 
+def _curl_text(resp) -> str:
+    text = getattr(resp, "text", "") or ""
+    if text:
+        return text
+    content = getattr(resp, "content", b"") or b""
+    for enc in ("euc-kr", "cp949", "utf-8"):
+        try:
+            return content.decode(enc)
+        except Exception:
+            pass
+    return content.decode("utf-8", errors="replace")
+
+
+def login_baekseok(session) -> None:
+    if curl_requests is None:
+        raise RuntimeError("curl_cffi is required for Baekseok unified login")
+
+    user_id = os.environ.get("GYS_ID")
+    user_pw = os.environ.get("GYS_PW")
+    if not user_id or not user_pw:
+        raise RuntimeError("Set env vars GYS_ID / GYS_PW for baekseok login")
+
+    returl = f"{BAEKSEOK_BASE}/member/login.php?preURL=%2Frent%2Ftennis_rent.php%3Fpart_opt%3D{BAEKSEOK_PART_OPT}"
+    login_url = f"https://yeyak.gys.or.kr/fmcs/27?referer={quote(returl, safe='')}&login_check=skip"
+
+    r0 = session.get(login_url, timeout=25, verify=False)
+    html0 = _curl_text(r0)
+    soup = BeautifulSoup(html0, "lxml")
+    form = soup.select_one("form#memberLoginForm")
+    if not form:
+        raise RuntimeError("Baekseok unified login form not found")
+
+    payload: Dict[str, str] = {}
+    for inp in form.select("input[name]"):
+        name = inp.get("name")
+        if name:
+            payload[name] = inp.get("value", "")
+    payload["userId"] = user_id
+    payload["userPassword"] = user_pw
+
+    post_url = urljoin(getattr(r0, "url", login_url), form.get("action") or "")
+    r1 = session.post(post_url, data=payload, timeout=25, verify=False, allow_redirects=True)
+    html1 = _curl_text(r1)
+    soup1 = BeautifulSoup(html1, "lxml")
+
+    if soup1.select_one("form#memberLoginForm"):
+        raise RuntimeError("Baekseok unified login failed")
+
+    sso_form = soup1.select_one("form#form_sso_process")
+    if not sso_form:
+        raise RuntimeError("Baekseok SSO form not found after unified login")
+
+    sso_payload: Dict[str, str] = {}
+    for inp in sso_form.select("input[name]"):
+        name = inp.get("name")
+        if name:
+            sso_payload[name] = inp.get("value", "")
+
+    sso_url = sso_form.get("action") or ""
+    session.post(
+        sso_url,
+        data=sso_payload,
+        timeout=25,
+        verify=False,
+        allow_redirects=True,
+        headers={"Origin": "https://yeyak.gys.or.kr", "Referer": getattr(r1, "url", login_url)},
+    )
+
+
+def _baekseok_post(session, payload: Dict[str, str]):
+    return session.post(
+        BAEKSEOK_RENT,
+        data=payload,
+        timeout=25,
+        verify=False,
+        allow_redirects=True,
+        headers={"Origin": BAEKSEOK_BASE, "Referer": f"{BAEKSEOK_RENT}?part_opt={BAEKSEOK_PART_OPT}"},
+    )
+
+
+def _baekseok_is_login_required(html: str, final_url: str = "") -> bool:
+    return "member/login.php" in (final_url or "") or "회원전용" in html or "로그인후 이용" in html
+
+
+def crawl_baekseok() -> dict:
+    cutoff_passed, dates_ymd = build_date_range_kst(cutoff_day=25, cutoff_hour=10, cutoff_minute=0)
+    now = kst_now()
+    print(f"[BAEKSEOK] KST now={now:%Y-%m-%d %H:%M} cutoffPassed={cutoff_passed} dates={len(dates_ymd)}")
+
+    facility_id = "gy-baekseok"
+    facilities = {facility_id: {"title": "백석 테니스장", "location": "고양시"}}
+    availability: Dict[str, Dict[str, List[dict]]] = {facility_id: {}}
+    stats = {"total": 0, "ok": 0, "empty": 0, "fail": 0, "login_required": 0}
+
+    if curl_requests is None:
+        print("[BAEKSEOK][WARN] curl_cffi unavailable; skip")
+        print("[BAEKSEOK][STAT] total=0 ok=0 empty=0 fail=1 login_required=0")
+        return {"facilities": facilities, "availability": availability}
+
+    session = curl_requests.Session(impersonate="chrome")
+    session.headers.update({"User-Agent": UA, "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8"})
+
+    try:
+        login_baekseok(session)
+    except Exception as e:
+        stats["fail"] += 1
+        stats["login_required"] += 1
+        print(f"[BAEKSEOK][ERR] login failed: {e}")
+        print(
+            f"[BAEKSEOK][STAT] total={stats['total']} ok={stats['ok']} empty={stats['empty']} "
+            f"fail={stats['fail']} login_required={stats['login_required']}"
+        )
+        return {"facilities": facilities, "availability": availability}
+
+    # 백석은 URL의 part_opt=07로 시설이 고정된다. place_opt는 비워 먼저 조회하고,
+    # 화면에 코트별 place_opt가 노출되면 그 값을 추가로 순회한다.
+    discovered_places = [""]
+
+    for ymd in dates_ymd:
+        yyyymmdd = yyyymmdd_from_ymd(ymd)
+        day_slots: List[dict] = []
+        places_for_day = list(dict.fromkeys(discovered_places))
+
+        for place_idx, place_opt in enumerate(places_for_day, start=1):
+            stats["total"] += 1
+            try:
+                payload = build_payload_gys(place_opt, yyyymmdd, part_opt=BAEKSEOK_PART_OPT)
+                html = ""
+                final_url = ""
+                resp = _baekseok_post(session, payload)
+                html = _curl_text(resp)
+                final_url = getattr(resp, "url", "")
+
+                if _baekseok_is_login_required(html, final_url):
+                    login_baekseok(session)
+                    resp = _baekseok_post(session, payload)
+                    html = _curl_text(resp)
+                    final_url = getattr(resp, "url", "")
+
+                if _baekseok_is_login_required(html, final_url):
+                    stats["login_required"] += 1
+                    raise RuntimeError(f"baekseok login required after retry. final_url={final_url}")
+
+                soup = BeautifulSoup(html, "lxml")
+                for opt in soup.select('select[name="place_opt"] option[value], input[name="place_opt"][value]'):
+                    value = (opt.get("value") or "").strip()
+                    if value and value not in discovered_places:
+                        discovered_places.append(value)
+
+                slots = parse_slots_daehwa(html)
+                for sl in slots:
+                    sl["courtNo"] = str(place_opt or place_idx)
+                    sl["reserveUrl"] = f"{BAEKSEOK_RENT}?part_opt={BAEKSEOK_PART_OPT}"
+
+                if slots:
+                    day_slots.extend(slots)
+                    stats["ok"] += 1
+                else:
+                    stats["empty"] += 1
+            except Exception as e:
+                stats["fail"] += 1
+                print(f"[BAEKSEOK][ERR] date={ymd} place_opt={place_opt or '-'} err={e}")
+                if "login required after retry" in str(e):
+                    print("[BAEKSEOK][EARLY_ABORT] reservation page still requires login after SSO")
+                    print(
+                        f"[BAEKSEOK][STAT] total={stats['total']} ok={stats['ok']} empty={stats['empty']} "
+                        f"fail={stats['fail']} login_required={stats['login_required']}"
+                    )
+                    return {"facilities": facilities, "availability": availability}
+
+        if day_slots:
+            availability[facility_id].setdefault(ymd, []).extend(day_slots)
+
+    print(
+        f"[BAEKSEOK][STAT] total={stats['total']} ok={stats['ok']} empty={stats['empty']} "
+        f"fail={stats['fail']} login_required={stats['login_required']}"
+    )
+    return {"facilities": facilities, "availability": availability}
+
+
 def merge(a: dict, b: dict) -> dict:
     out = {
         "facilities": {**a.get("facilities", {}), **b.get("facilities", {})},
@@ -761,5 +949,6 @@ def merge(a: dict, b: dict) -> dict:
 if __name__ == "__main__":
     out_gyt = crawl_gytennis()
     out_dae = crawl_daehwa()
+    out_bae = crawl_baekseok()
 
-    print(json.dumps(merge(out_gyt, out_dae), ensure_ascii=False, indent=2))
+    print(json.dumps(merge(merge(out_gyt, out_dae), out_bae), ensure_ascii=False, indent=2))

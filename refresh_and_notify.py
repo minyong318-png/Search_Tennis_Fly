@@ -1,5 +1,6 @@
 import os
 import json
+import re
 import subprocess
 import time
 from datetime import datetime, date, timedelta, timezone
@@ -71,6 +72,7 @@ def get_court_group(title: str, facility_id: str = "") -> str:
     if str(facility_id).startswith("yongin:"):
         return f"용인|{base}"
     if str(facility_id).startswith("goyang:"):
+        base = normalize_goyang_court_group(base)
         return f"고양|{base}"
     if str(facility_id).startswith("suwon:"):
         return f"수원|{base}"
@@ -206,8 +208,20 @@ def _ymd_to_yyyymmdd(s: str) -> str:
 def _clean_goyang_title(title: str) -> str:
     if not title:
         return title
-    # "고양특례시테니스협회 " 제거 (공백 유무 모두 대응)
-    return title.replace("고양특례시테니스협회", "").strip()
+    title = re.sub(r"\[.*?\]", "", title)
+    title = re.sub(r"고양\s*(특례시)?\s*테니스\s*협회", "", title)
+    title = re.sub(r"^고양\s+", "", title)
+    title = re.sub(r"\s+", " ", title)
+    return title.strip()
+
+
+def normalize_goyang_court_group(title: str) -> str:
+    base = _clean_goyang_title(title or "")
+    base = re.sub(r"\s*\d+\s*코트\s*$", "", base)
+    base = re.sub(r"\s*테니스장\s*$", "", base)
+    base = re.sub(r"\s*코트\s*$", "", base)
+    base = re.sub(r"\s+", " ", base).strip()
+    return base
 
 def _goyang_split_title(meta: dict, suffix: str) -> dict:
     """시설 meta를 복사해서 title에 suffix를 붙인다."""
@@ -299,14 +313,31 @@ def crawl_all() -> Tuple[Dict[str, Any], Dict[str, Dict[str, List[Any]]]]:
             print("[DAEHWA] skipped:", e)
             out_g2 = {"facilities": {}, "availability": {}}
 
-        g_fac = {**out_g1.get("facilities", {}), **out_g2.get("facilities", {})}
-        g_av = {**out_g1.get("availability", {}), **out_g2.get("availability", {})}
+        try:
+            started = time.perf_counter()
+            out_g3 = crawl_goyang.crawl_baekseok()
+            print(f"[BAEKSEOK][ELAPSED] seconds={time.perf_counter() - started:.2f}")
+        except Exception as e:
+            print("[BAEKSEOK] skipped:", e)
+            out_g3 = {"facilities": {}, "availability": {}}
+
+        g_fac = {
+            **out_g1.get("facilities", {}),
+            **out_g2.get("facilities", {}),
+            **out_g3.get("facilities", {}),
+        }
+        g_av = {
+            **out_g1.get("availability", {}),
+            **out_g2.get("availability", {}),
+            **out_g3.get("availability", {}),
+        }
 
         # -------------------------------------------------
         # 고양 base meta 확보 (코트별 분리 시 title 생성용)
         # -------------------------------------------------
         base_meta_gytennis: Dict[str, dict] = {}   # cv -> meta2
         base_meta_daehwa: Optional[dict] = None
+        base_meta_baekseok: Optional[dict] = None
 
         for raw_fid, meta in (g_fac or {}).items():
             raw_fid = str(raw_fid)
@@ -320,6 +351,10 @@ def crawl_all() -> Tuple[Dict[str, Any], Dict[str, Dict[str, List[Any]]]]:
 
             if raw_fid == "gy-daehwa":
                 base_meta_daehwa = meta2
+                continue
+
+            if raw_fid == "gy-baekseok":
+                base_meta_baekseok = meta2
                 continue
 
             # 기타 facility가 있다면 그대로 저장
@@ -414,6 +449,29 @@ def crawl_all() -> Tuple[Dict[str, Any], Dict[str, Dict[str, List[Any]]]]:
 
                 for cno, c_daymap in split.items():
                     fid = f"goyang:daehwa:{cno}"
+                    facilities[fid] = _goyang_split_title(base_meta, f"{cno}코트")
+                    availability[fid] = c_daymap
+
+                continue
+
+            # ---------- baekseok ----------
+            if raw_fid == "gy-baekseok":
+                new_daymap: Dict[str, List[Any]] = {}
+                for ymd, slots in (daymap or {}).items():
+                    ymd = str(ymd)
+                    yyyymmdd = _ymd_to_yyyymmdd(ymd)
+                    if len(yyyymmdd) != 8:
+                        continue
+                    new_daymap[yyyymmdd] = slots or []
+
+                def baekseok_url_builder(slot: dict, yyyymmdd: str) -> str:
+                    return "https://gbc.gys.or.kr:446/rent/tennis_rent.php?part_opt=07"
+
+                split = _split_daymap_by_court(new_daymap, baekseok_url_builder)
+                base_meta = base_meta_baekseok or {"title": "백석", "location": "고양시"}
+
+                for cno, c_daymap in split.items():
+                    fid = f"goyang:baekseok:{cno}"
                     facilities[fid] = _goyang_split_title(base_meta, f"{cno}코트")
                     availability[fid] = c_daymap
 
