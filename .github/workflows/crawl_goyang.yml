@@ -29,7 +29,6 @@ jobs:
 
       - name: Refresh Korean gov SSL pins
         continue-on-error: true
-        working-directory: Serch_Tennis_Fly
         run: python fetch_korea_gov_certs.py
 
       - name: Run refresh (Goyang)
