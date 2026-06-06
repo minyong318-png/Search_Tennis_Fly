@@ -84,6 +84,68 @@ def get_court_group(title: str, facility_id: str = "") -> str:
         return f"성남|{base}"
     return base
 
+def slot_time_range_minutes(time_content: Any) -> Optional[Tuple[int, int]]:
+    matches = re.findall(r"(\d{1,2}):(\d{2})", str(time_content or ""))
+    if not matches:
+        return None
+    start = int(matches[0][0]) * 60 + int(matches[0][1])
+    if len(matches) >= 2:
+        end = int(matches[1][0]) * 60 + int(matches[1][1])
+    else:
+        end = start + 30
+    if end <= start:
+        end += 24 * 60
+    return start, end
+
+
+def normalize_time_condition(mode: Any, hour: Any) -> Tuple[str, Optional[int]]:
+    mode_s = str(mode or "any").strip().lower()
+    if mode_s not in {"after", "before", "contains"}:
+        return "any", None
+    try:
+        hour_i = int(hour)
+    except (TypeError, ValueError):
+        return "any", None
+    if not 0 <= hour_i <= 23:
+        return "any", None
+    return mode_s, hour_i
+
+
+def time_condition_label(mode: str, hour: Optional[int]) -> str:
+    mode, hour = normalize_time_condition(mode, hour)
+    if mode == "any":
+        return "시간 전체"
+    labels = {"after": "이후", "before": "이전", "contains": "포함"}
+    return f"{hour}시 {labels[mode]}"
+
+
+def alarm_baseline_group(court_group: str, mode: str, hour: Optional[int]) -> str:
+    mode, hour = normalize_time_condition(mode, hour)
+    if mode == "any":
+        return court_group
+    return f"{court_group}__time_{mode}_{hour}"
+
+
+def slot_matches_time_condition(t: Any, mode: str, hour: Optional[int]) -> bool:
+    mode, hour = normalize_time_condition(mode, hour)
+    if mode == "any":
+        return True
+    if isinstance(t, dict):
+        time_content = t.get("timeContent") or t.get("label") or t.get("time") or t.get("startTime") or t.get("start_time") or t.get("stime")
+    else:
+        time_content = t
+    rng = slot_time_range_minutes(time_content)
+    if not rng:
+        return True
+    start, end = rng
+    target = hour * 60
+    if mode == "after":
+        return start >= target
+    if mode == "before":
+        return start < target
+    return start <= target < end
+
+
 def slot_key_from_time(t: Any) -> str:
     """
     tennis_core 결과 슬롯이 str이 아니라 dict로 오는 케이스 대응.
@@ -173,6 +235,18 @@ create table if not exists public.availability_cache (
 );
 
 create index if not exists idx_avcache_date on public.availability_cache(date_ymd);
+
+alter table if exists public.alarms
+  add column if not exists time_mode text not null default 'any';
+
+alter table if exists public.alarms
+  add column if not exists time_hour integer;
+
+alter table if exists public.alarms
+  drop constraint if exists alarms_subscription_id_court_group_date_key;
+
+create unique index if not exists uniq_alarms_subscription_court_date_time
+  on public.alarms (subscription_id, court_group, date, time_mode, coalesce(time_hour, -1));
 """
 
 def ensure_extra_schema(conn: psycopg.Connection) -> None:
@@ -693,12 +767,12 @@ def load_push_subscriptions(conn: psycopg.Connection, sub_ids: List[str]) -> Dic
 
 def load_alarms(conn: psycopg.Connection) -> List[dict]:
     """
-    alarms: subscription_id, court_group, date(text)
+    alarms: subscription_id, court_group, date(text), optional time condition
     """
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
             """
-            select subscription_id, court_group, date
+            select subscription_id, court_group, date, time_mode, time_hour
             from public.alarms
             """
         )
@@ -990,17 +1064,22 @@ def main() -> None:
         sub_ids = sorted({str(a["subscription_id"]) for a in alarms if a.get("subscription_id")})
         push_map = load_push_subscriptions(conn, sub_ids)
 
-        # 5) alarms를 (subscription_id, court_group, yyyymmdd) 키로 정규화
+        # 5) alarms를 정규화한다. baseline은 시간 조건별로 분리해 새 알람의 오탐을 막는다.
+        alarm_records: List[dict] = []
         alarm_keys: List[Tuple[str, str, str]] = []
         for a in alarms:
             sid = str(a["subscription_id"])
             group = (a.get("court_group") or "").strip()
             ymd = to_yyyymmdd(a.get("date") or "")
+            mode, hour = normalize_time_condition(a.get("time_mode"), a.get("time_hour"))
             if not sid or not group or len(ymd) != 8:
                 continue
-            alarm_keys.append((sid, group, ymd))
+            baseline_group = alarm_baseline_group(group, mode, hour)
+            record = {"sid": sid, "group": group, "ymd": ymd, "mode": mode, "hour": hour, "baseline_group": baseline_group}
+            alarm_records.append(record)
+            alarm_keys.append((sid, baseline_group, ymd))
 
-        if not alarm_keys:
+        if not alarm_records:
             print("[SUMMARY] alarms valid=0 (bad date/group)")
             return
 
@@ -1022,10 +1101,17 @@ def main() -> None:
         key_to_current_slots: Dict[Tuple[str, str, str], Set[str]] = {}
         all_candidate_slot_keys: Set[str] = set()
 
-        for (sid, group, ymd) in alarm_keys:
+        for alarm in alarm_records:
+            sid = alarm["sid"]
+            group = alarm["group"]
+            ymd = alarm["ymd"]
+            mode = alarm["mode"]
+            hour = alarm["hour"]
+            baseline_group = alarm["baseline_group"]
             fids = group_to_fids.get(group, [])
+            current_key = (sid, baseline_group, ymd)
             if not fids:
-                key_to_current_slots[(sid, group, ymd)] = set()
+                key_to_current_slots[current_key] = set()
                 continue
 
             cur_slots: Set[str] = set()
@@ -1033,15 +1119,16 @@ def main() -> None:
                 day_map = availability.get(str(fid)) or {}
                 slots = day_map.get(ymd) or []
                 for t in slots:
+                    if not slot_matches_time_condition(t, mode, hour):
+                        continue
                     sk = slot_key_from_time(t)
                     if sk:
                         cur_slots.add(sk)
 
-                        # sent_slots는 slot_key만 저장하니까
-                        # (facility 구분까지 필요하면 slot_key 설계를 더 고유하게 해야 함)
+                        # sent_slots는 slot_key만 저장하니까 같은 사용자에게 같은 슬롯 중복 알림을 막는다.
                         all_candidate_slot_keys.add(sk)
 
-            key_to_current_slots[(sid, group, ymd)] = cur_slots
+            key_to_current_slots[current_key] = cur_slots
 
         # 9) sent_slots preload (한 번에)
         sent_map = preload_sent_slots(conn, sub_ids, sorted(all_candidate_slot_keys))
@@ -1051,8 +1138,15 @@ def main() -> None:
         baseline_inserts = 0
         added_total = 0
 
-        for (sid, group, ymd) in alarm_keys:
-            cur_slots = key_to_current_slots.get((sid, group, ymd), set())
+        for alarm in alarm_records:
+            sid = alarm["sid"]
+            group = alarm["group"]
+            ymd = alarm["ymd"]
+            mode = alarm["mode"]
+            hour = alarm["hour"]
+            baseline_group = alarm["baseline_group"]
+            base_key = (sid, baseline_group, ymd)
+            cur_slots = key_to_current_slots.get(base_key, set())
 
             # push 구독이 없으면 스킵
             sub_info = push_map.get(sid)
@@ -1060,11 +1154,10 @@ def main() -> None:
                 continue
 
             # baseline이 없다면: "첫 실행"으로 보고 baseline 저장 후 알림 스킵
-            base_key = (sid, group, ymd)
             baseline = baseline_map.get(base_key)
             if not baseline:
                 if cur_slots:
-                    insert_baseline(conn, sid, group, ymd, cur_slots)
+                    insert_baseline(conn, sid, baseline_group, ymd, cur_slots)
                     baseline_inserts += 1
                     baseline_map[base_key] = set(cur_slots)
                 continue
@@ -1086,7 +1179,8 @@ def main() -> None:
             more = "" if len(to_send) <= 6 else f" 외 {len(to_send)-6}개"
 
             title = "🎾 예약 오픈"
-            body = f"{group} {ymd[4:6]}/{ymd[6:8]} 신규 슬롯: {preview}{more}"
+            condition = time_condition_label(mode, hour)
+            body = f"{group} {ymd[4:6]}/{ymd[6:8]} {condition} 신규 슬롯: {preview}{more}"
 
             try:
                 send_push(sub_info, title, body)
