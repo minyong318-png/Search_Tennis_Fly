@@ -359,6 +359,8 @@ def crawl_gytennis() -> dict:
     s = make_gytennis_session()
     ssl_fallback_state = {"use_insecure": False}
     warmup_gytennis_session(s, ssl_fallback_state)
+    worker_local = threading.local()
+    session_generation = {"value": 0}
 
     facilities: Dict[str, dict] = {}
     availability: Dict[str, Dict[str, List[dict]]] = {}
@@ -416,9 +418,17 @@ def crawl_gytennis() -> dict:
                 )
         (out_dir / f"{tag}_summary.txt").write_text("\n".join(summary_lines) + "\n", encoding="utf-8")
 
+    def _worker_session() -> requests.Session:
+        local_generation = getattr(worker_local, "generation", -1)
+        if local_generation != session_generation["value"] or not hasattr(worker_local, "session"):
+            worker_local.session = make_gytennis_session()
+            worker_local.generation = session_generation["value"]
+            warmup_gytennis_session(worker_local.session, ssl_fallback_state)
+        return worker_local.session
+
     def _task(cv: int, ymd: str) -> Tuple[int, str, str, List[dict]]:
         try:
-            court_slots = fetch_gytennis_day(s, cv, ymd, ssl_fallback_state)
+            court_slots = fetch_gytennis_day(_worker_session(), cv, ymd, ssl_fallback_state)
             if not court_slots:
                 return cv, ymd, "empty", []
             flat: List[dict] = []
@@ -457,6 +467,7 @@ def crawl_gytennis() -> dict:
         print("[GYT][EARLY_ABORT] probe detected all-empty pattern; retry with new session")
         s = make_gytennis_session()
         ssl_fallback_state = {"use_insecure": False}
+        session_generation["value"] += 1
         warmup_gytennis_session(s, ssl_fallback_state)
         probe_ok = _probe_session(sample_size=8)
         if not probe_ok:

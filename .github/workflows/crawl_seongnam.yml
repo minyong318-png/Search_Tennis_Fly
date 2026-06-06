@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: isdc-seongnam-crawl
+  group: tennis-crawl-seongnam
   cancel-in-progress: false
 
 jobs:
