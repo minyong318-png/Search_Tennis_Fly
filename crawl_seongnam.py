@@ -79,36 +79,21 @@ def _parse_timetable(html: str) -> list[dict]:
     return slots
 
 
-def _crawl_court(session: requests.Session, fac_id: str) -> Dict[str, list]:
-    detail = _request(session, "POST", "facilityInfo.do", data={"facId": fac_id}, timeout=20)
-    soup = BeautifulSoup(detail.text, "lxml")
-    day_input = soup.select_one("#outResDay")
-    max_day = int(day_input.get("value", "2")) if day_input else 2
+def _days_ahead() -> int:
+    raw = (os.getenv("SEONGNAM_DAYS_AHEAD") or "45").strip()
+    try:
+        return max(0, min(int(raw), 90))
+    except ValueError:
+        return 45
 
+
+def _crawl_court(session: requests.Session, fac_id: str, days_ahead: int) -> Dict[str, list]:
     daymap: Dict[str, list] = {}
-    for offset in range(max_day + 1):
+    for offset in range(days_ahead + 1):
         current = date.today() + timedelta(days=offset)
         request_date = f"{current.year}-{current.month}-{current.day}"
         yyyymmdd = current.strftime("%Y%m%d")
         try:
-            closed = _request(
-                session,
-                "GET",
-                "getClosedDayInfoByDate.do",
-                params={"facId": fac_id, "resdate": request_date},
-                timeout=20,
-            )
-            status = _request(
-                session,
-                "GET",
-                "getReservationInfoByDate.do",
-                params={"facId": fac_id, "resdate": request_date},
-                timeout=20,
-            )
-            if closed.text.strip() == "closed" or status.text.strip() in ("full", "empty", "closed"):
-                daymap[yyyymmdd] = []
-                continue
-
             timetable = _request(
                 session,
                 "POST",
@@ -175,10 +160,12 @@ def crawl_seongnam() -> Dict[str, Any]:
             print(f"[SEONGNAM][WARN] group={group_id} error={exc}")
 
     if not login_required:
+        days_ahead = _days_ahead()
+        print(f"[SEONGNAM][DAYS] days_ahead={days_ahead} dates_per_court={days_ahead + 1}")
         for fac_id in facilities:
             total += 1
             try:
-                daymap = _crawl_court(session, fac_id)
+                daymap = _crawl_court(session, fac_id, days_ahead)
                 availability[fac_id] = daymap
                 if any(daymap.values()):
                     ok += 1
