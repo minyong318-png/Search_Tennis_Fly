@@ -983,48 +983,48 @@ def main() -> None:
     snapshot_rows: List[Tuple[str, date, str]] = []   # (facility_id, date_ymd, slot_key)
     sent_rows: List[Tuple[str, str]] = []            # (subscription_id, slot_key)
 
+    # 1) Crawl before opening Supabase connection so long city crawls do not idle-timeout DB sessions.
+    facilities, availability = crawl_all()
+    print(f"[INFO] crawled facilities={len(availability)}")
+
+    # ✅ 이번 실행 타겟/기간에 해당하는 캐시를 먼저 비워두고(빈 배열),
+    #    아래 upsert에서 다시 채운다.
+    goyang_slots = count_slots_for_prefix(availability, "goyang:gytennis:")
+    protect_goyang_cache = target in ("all", "goyang") and goyang_slots == 0
+    if protect_goyang_cache:
+        print("[GOYANG][SAFEGUARD] gytennis slots=0; keep existing goyang cache")
+
+    suwon_slots = count_slots_for_prefix(availability, "suwon:")
+    protect_suwon_cache = target in ("all", "suwon") and suwon_slots == 0
+    if protect_suwon_cache:
+        print("[SUWON][SAFEGUARD] slots=0; keep existing suwon cache")
+
+    seongnam_slots = count_slots_for_prefix(availability, "seongnam:")
+    protect_seongnam_cache = target in ("all", "seongnam") and seongnam_slots == 0
+    if protect_seongnam_cache:
+        print("[SEONGNAM][SAFEGUARD] slots=0; keep existing seongnam cache")
+
+    facilities_for_write = facilities
+    availability_for_write = availability
+    clear_target = target
+    if protect_goyang_cache:
+        facilities_for_write = {k: v for k, v in facilities_for_write.items() if not str(k).startswith("goyang:")}
+        availability_for_write = {k: v for k, v in availability_for_write.items() if not str(k).startswith("goyang:")}
+
+    excluded_cache_prefixes = []
+    if protect_goyang_cache:
+        excluded_cache_prefixes.append("goyang:")
+    if protect_suwon_cache:
+        excluded_cache_prefixes.append("suwon:")
+    if protect_seongnam_cache:
+        excluded_cache_prefixes.append("seongnam:")
+
     with psycopg.connect(database_url) as conn:
-        # 프론트용 테이블만 (없으면) 추가 생성
+        # Frontend tables and alarm housekeeping are DB work, so run them after crawling.
         ensure_extra_schema(conn)
         deleted_alarms = cleanup_expired_alarms(conn)
         if deleted_alarms:
             print(f"[ALARMS] expired deleted={deleted_alarms} (KST<{kst_today_yyyymmdd()})")
-        
-        # 1) 크롤링
-        facilities, availability = crawl_all()
-        print(f"[INFO] crawled facilities={len(availability)}")
-
-        # ✅ 이번 실행 타겟/기간에 해당하는 캐시를 먼저 비워두고(빈 배열),
-        #    아래 upsert에서 다시 채운다.
-        goyang_slots = count_slots_for_prefix(availability, "goyang:gytennis:")
-        protect_goyang_cache = target in ("all", "goyang") and goyang_slots == 0
-        if protect_goyang_cache:
-            print("[GOYANG][SAFEGUARD] gytennis slots=0; keep existing goyang cache")
-
-        suwon_slots = count_slots_for_prefix(availability, "suwon:")
-        protect_suwon_cache = target in ("all", "suwon") and suwon_slots == 0
-        if protect_suwon_cache:
-            print("[SUWON][SAFEGUARD] slots=0; keep existing suwon cache")
-
-        seongnam_slots = count_slots_for_prefix(availability, "seongnam:")
-        protect_seongnam_cache = target in ("all", "seongnam") and seongnam_slots == 0
-        if protect_seongnam_cache:
-            print("[SEONGNAM][SAFEGUARD] slots=0; keep existing seongnam cache")
-
-        facilities_for_write = facilities
-        availability_for_write = availability
-        clear_target = target
-        if protect_goyang_cache:
-            facilities_for_write = {k: v for k, v in facilities_for_write.items() if not str(k).startswith("goyang:")}
-            availability_for_write = {k: v for k, v in availability_for_write.items() if not str(k).startswith("goyang:")}
-
-        excluded_cache_prefixes = []
-        if protect_goyang_cache:
-            excluded_cache_prefixes.append("goyang:")
-        if protect_suwon_cache:
-            excluded_cache_prefixes.append("suwon:")
-        if protect_seongnam_cache:
-            excluded_cache_prefixes.append("seongnam:")
 
         mm = compute_minmax_yyyymmdd(availability)
         if mm:
