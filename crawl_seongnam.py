@@ -1,5 +1,8 @@
 import os
 import re
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, timedelta
 from typing import Any, Dict
 
@@ -11,6 +14,7 @@ from urllib3.util.retry import Retry
 
 BASE_URL = "https://res.isdc.co.kr"
 LIST_URL = f"{BASE_URL}/facilityList.do?facType=29"
+_thread_local = threading.local()
 
 
 def _session() -> requests.Session:
@@ -87,6 +91,23 @@ def _days_ahead() -> int:
         return 45
 
 
+def _max_workers() -> int:
+    raw = (os.getenv("SEONGNAM_MAX_WORKERS") or "8").strip()
+    try:
+        return max(1, min(int(raw), 16))
+    except ValueError:
+        return 8
+
+
+def _thread_session() -> requests.Session:
+    session = getattr(_thread_local, "session", None)
+    if session is None:
+        session = _session()
+        _login(session)
+        _thread_local.session = session
+    return session
+
+
 def _crawl_court(session: requests.Session, fac_id: str, days_ahead: int) -> Dict[str, list]:
     daymap: Dict[str, list] = {}
     for offset in range(days_ahead + 1):
@@ -108,7 +129,12 @@ def _crawl_court(session: requests.Session, fac_id: str, days_ahead: int) -> Dic
     return daymap
 
 
+def _crawl_court_threaded(fac_id: str, days_ahead: int) -> Dict[str, list]:
+    return _crawl_court(_thread_session(), fac_id, days_ahead)
+
+
 def crawl_seongnam() -> Dict[str, Any]:
+    started_at = time.perf_counter()
     session = _session()
     facilities: Dict[str, dict] = {}
     availability: Dict[str, Dict[str, list]] = {}
@@ -161,25 +187,35 @@ def crawl_seongnam() -> Dict[str, Any]:
 
     if not login_required:
         days_ahead = _days_ahead()
+        max_workers = min(_max_workers(), max(1, len(facilities)))
         print(f"[SEONGNAM][DAYS] days_ahead={days_ahead} dates_per_court={days_ahead + 1}")
-        for fac_id in facilities:
-            total += 1
-            try:
-                daymap = _crawl_court(session, fac_id, days_ahead)
-                availability[fac_id] = daymap
-                if any(daymap.values()):
-                    ok += 1
-                else:
-                    empty += 1
-            except Exception as exc:
-                fail += 1
-                print(f"[SEONGNAM][WARN] court={fac_id} error={exc}")
+        print(f"[SEONGNAM][REQUESTS] courts={len(facilities)} dates={days_ahead + 1} workers={max_workers}")
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(_crawl_court_threaded, fac_id, days_ahead): fac_id
+                for fac_id in facilities
+            }
+            for future in as_completed(futures):
+                fac_id = futures[future]
+                total += 1
+                try:
+                    daymap = future.result()
+                    availability[fac_id] = daymap
+                    if any(daymap.values()):
+                        ok += 1
+                    else:
+                        empty += 1
+                except Exception as exc:
+                    fail += 1
+                    availability[fac_id] = {}
+                    print(f"[SEONGNAM][WARN] court={fac_id} error={exc}")
 
     slots = sum(len(items) for daymap in availability.values() for items in daymap.values())
     print(
         f"[SEONGNAM][STATS] total={total} ok={ok} empty={empty} fail={fail} "
         f"courts={len(facilities)} slots={slots} login_required={int(login_required)}"
     )
+    print(f"[SEONGNAM][ELAPSED] seconds={time.perf_counter() - started_at:.2f}")
     if login_required:
         print("[SEONGNAM][INFO] public court list collected; availability requires login")
     return {
