@@ -20,25 +20,25 @@ def get_connector():
 
 def get_time_concurrency():
     try:
-        value = int(os.getenv("YONGIN_TIME_CONCURRENCY", "40"))
+        value = int(os.getenv("YONGIN_TIME_CONCURRENCY", "50"))
     except ValueError:
-        value = 40
+        value = 50
     return max(1, min(value, 60))
 
 
 def get_time_request_timeout():
     try:
-        value = float(os.getenv("YONGIN_TIME_TIMEOUT", "6"))
+        value = float(os.getenv("YONGIN_TIME_TIMEOUT", "4"))
     except ValueError:
-        value = 6.0
+        value = 4.0
     return max(2.0, min(value, 15.0))
 
 
 def get_time_request_retries():
     try:
-        value = int(os.getenv("YONGIN_TIME_RETRIES", "2"))
+        value = int(os.getenv("YONGIN_TIME_RETRIES", "1"))
     except ValueError:
-        value = 2
+        value = 1
     return max(0, min(value, 4))
 
 
