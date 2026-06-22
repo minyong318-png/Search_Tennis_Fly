@@ -627,6 +627,58 @@ def upsert_facilities_for_frontend(conn: psycopg.Connection, facilities: Dict[st
         )
     conn.commit()
 
+def prune_stale_yongin_facilities(
+    conn: psycopg.Connection,
+    current_facility_ids: Iterable[str],
+    min_current_count: int = 30,
+) -> Tuple[int, int]:
+    """
+    Keep only Yongin facilities present in the latest Yongin facility list.
+
+    Yongin issues month-specific resveId values, so old months accumulate in
+    public.facilities unless we explicitly prune them. The current site list
+    normally contains the active month plus the newly opened next month near
+    month-end; on the 1st it naturally drops the previous month.
+    """
+    keep_ids = sorted({str(fid) for fid in current_facility_ids if str(fid).startswith("yongin:")})
+    if len(keep_ids) < min_current_count:
+        print(f"[YONGIN][PRUNE] skipped: current facility ids too small ({len(keep_ids)}<{min_current_count})")
+        return 0, 0
+
+    deleted_snapshots = 0
+    deleted_facilities = 0
+    with conn.cursor() as cur:
+        cur.execute("select to_regclass('public.slots_snapshot')")
+        has_snapshot = cur.fetchone()[0] is not None
+        if has_snapshot:
+            cur.execute(
+                """
+                delete from public.slots_snapshot
+                 where facility_id like 'yongin:%'
+                   and not (facility_id = any(%s))
+                """,
+                (keep_ids,),
+            )
+            deleted_snapshots = cur.rowcount
+
+        cur.execute(
+            """
+            delete from public.facilities
+             where facility_id like 'yongin:%'
+               and not (facility_id = any(%s))
+            """,
+            (keep_ids,),
+        )
+        deleted_facilities = cur.rowcount
+
+    conn.commit()
+    print(
+        "[YONGIN][PRUNE] "
+        f"keep={len(keep_ids)} deleted_facilities={deleted_facilities} "
+        f"deleted_snapshots={deleted_snapshots}"
+    )
+    return deleted_facilities, deleted_snapshots
+
 def clear_availability_cache_for_target(
     conn: psycopg.Connection,
     target: str,
@@ -1044,6 +1096,8 @@ def main() -> None:
         # 2) 프론트용 저장 (시설/availability_cache)
         try:
             upsert_facilities_for_frontend(conn, facilities_for_write)
+            if clear_target in ("all", "yongin"):
+                prune_stale_yongin_facilities(conn, facilities_for_write.keys())
             upsert_availability_cache_for_frontend(
                 conn,
                 facilities_for_write,
