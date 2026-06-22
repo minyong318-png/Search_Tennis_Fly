@@ -20,10 +20,18 @@ def get_connector():
 
 def get_time_concurrency():
     try:
-        value = int(os.getenv("YONGIN_TIME_CONCURRENCY", "40"))
+        value = int(os.getenv("YONGIN_TIME_CONCURRENCY", "60"))
     except ValueError:
-        value = 40
+        value = 60
     return max(1, min(value, 80))
+
+
+def get_time_request_timeout():
+    try:
+        value = float(os.getenv("YONGIN_TIME_TIMEOUT", "8"))
+    except ValueError:
+        value = 8.0
+    return max(2.0, min(value, 20.0))
 
 
 # --------------------------------------------------------------
@@ -134,18 +142,24 @@ async def fetch_facilities(session):
 async def fetch_times(session, date_val, rid, sem=None):
     url = "https://publicsports.yongin.go.kr/publicsports/sports/selectRegistTimeByChosenDateFcltyRceptResveApply.do"
     data = {"dateVal": date_val, "resveId": rid}
+    timeout = aiohttp.ClientTimeout(total=get_time_request_timeout())
 
-    try:
-        if sem:
-            async with sem:
-                async with session.post(url, data=data) as resp:
-                    j = await resp.json()
-                    return j.get("resveTmList", [])
-        async with session.post(url, data=data) as resp:
-            j = await resp.json()
-            return j.get("resveTmList", [])
-    except:
-        return []
+    for attempt in range(2):
+        try:
+            if sem:
+                async with sem:
+                    async with session.post(url, data=data, timeout=timeout) as resp:
+                        j = await resp.json()
+                        return j.get("resveTmList", [])
+            async with session.post(url, data=data, timeout=timeout) as resp:
+                j = await resp.json()
+                return j.get("resveTmList", [])
+        except Exception:
+            if attempt == 0:
+                await asyncio.sleep(0.2)
+                continue
+            return []
+    return []
 
 
 def get_facility_month(title):
@@ -220,7 +234,10 @@ async def run_all_async():
             len(build_target_dates(meta.get("title", ""), datetime.today() + timedelta(days=1)))
             for meta in facilities.values()
         )
-        print(f"[INFO] Yongin time requests={request_count} concurrency={get_time_concurrency()}")
+        print(
+            f"[INFO] Yongin time requests={request_count} "
+            f"concurrency={get_time_concurrency()} timeout={get_time_request_timeout():.1f}s"
+        )
         tasks = [
             fetch_availability(session, rid, meta.get("title", ""), sem)
             for rid, meta in facilities.items()
