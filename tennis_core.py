@@ -28,10 +28,10 @@ def get_time_concurrency():
 
 def get_time_request_timeout():
     try:
-        value = float(os.getenv("YONGIN_TIME_TIMEOUT", "8"))
+        value = float(os.getenv("YONGIN_TIME_TIMEOUT", "3"))
     except ValueError:
-        value = 8.0
-    return max(2.0, min(value, 20.0))
+        value = 3.0
+    return max(1.0, min(value, 10.0))
 
 
 # --------------------------------------------------------------
@@ -144,21 +144,17 @@ async def fetch_times(session, date_val, rid, sem=None):
     data = {"dateVal": date_val, "resveId": rid}
     timeout = aiohttp.ClientTimeout(total=get_time_request_timeout())
 
-    for attempt in range(2):
-        try:
-            if sem:
-                async with sem:
-                    async with session.post(url, data=data, timeout=timeout) as resp:
-                        j = await resp.json()
-                        return j.get("resveTmList", [])
-            async with session.post(url, data=data, timeout=timeout) as resp:
-                j = await resp.json()
-                return j.get("resveTmList", [])
-        except Exception:
-            if attempt == 0:
-                await asyncio.sleep(0.2)
-                continue
-            return []
+    try:
+        if sem:
+            async with sem:
+                async with session.post(url, data=data, timeout=timeout) as resp:
+                    j = await resp.json()
+                    return j.get("resveTmList", [])
+        async with session.post(url, data=data, timeout=timeout) as resp:
+            j = await resp.json()
+            return j.get("resveTmList", [])
+    except Exception:
+        return []
     return []
 
 
