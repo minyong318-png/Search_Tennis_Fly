@@ -15,23 +15,39 @@ HEADERS = {
 }
 
 def get_connector():
-    return aiohttp.TCPConnector(limit=60, ssl=False)
+    return aiohttp.TCPConnector(limit=get_time_concurrency(), ssl=False)
 
 
 def get_time_concurrency():
     try:
-        value = int(os.getenv("YONGIN_TIME_CONCURRENCY", "60"))
+        value = int(os.getenv("YONGIN_TIME_CONCURRENCY", "40"))
     except ValueError:
-        value = 60
-    return max(1, min(value, 80))
+        value = 40
+    return max(1, min(value, 60))
 
 
 def get_time_request_timeout():
     try:
-        value = float(os.getenv("YONGIN_TIME_TIMEOUT", "3"))
+        value = float(os.getenv("YONGIN_TIME_TIMEOUT", "6"))
     except ValueError:
-        value = 3.0
-    return max(1.0, min(value, 10.0))
+        value = 6.0
+    return max(2.0, min(value, 15.0))
+
+
+def get_time_request_retries():
+    try:
+        value = int(os.getenv("YONGIN_TIME_RETRIES", "2"))
+    except ValueError:
+        value = 2
+    return max(0, min(value, 4))
+
+
+CRAWL_STATS = {
+    "time_ok": 0,
+    "time_empty": 0,
+    "time_failed": 0,
+    "time_retried": 0,
+}
 
 
 # --------------------------------------------------------------
@@ -143,19 +159,27 @@ async def fetch_times(session, date_val, rid, sem=None):
     url = "https://publicsports.yongin.go.kr/publicsports/sports/selectRegistTimeByChosenDateFcltyRceptResveApply.do"
     data = {"dateVal": date_val, "resveId": rid}
     timeout = aiohttp.ClientTimeout(total=get_time_request_timeout())
+    attempts = get_time_request_retries() + 1
 
-    try:
-        if sem:
-            async with sem:
-                async with session.post(url, data=data, timeout=timeout) as resp:
-                    j = await resp.json()
-                    return j.get("resveTmList", [])
-        async with session.post(url, data=data, timeout=timeout) as resp:
-            j = await resp.json()
-            return j.get("resveTmList", [])
-    except Exception:
-        return []
-    return []
+    for attempt in range(attempts):
+        try:
+            if sem:
+                async with sem:
+                    async with session.post(url, data=data, timeout=timeout) as resp:
+                        resp.raise_for_status()
+                        j = await resp.json(content_type=None)
+                        return j.get("resveTmList", [])
+            async with session.post(url, data=data, timeout=timeout) as resp:
+                resp.raise_for_status()
+                j = await resp.json(content_type=None)
+                return j.get("resveTmList", [])
+        except Exception:
+            if attempt < attempts - 1:
+                CRAWL_STATS["time_retried"] += 1
+                await asyncio.sleep(0.15 * (attempt + 1))
+                continue
+            return None
+    return None
 
 
 def get_facility_month(title):
@@ -203,8 +227,14 @@ async def fetch_availability(session, rid, title="", sem=None):
     times_list = await asyncio.gather(*tasks)
 
     for date_val, times in zip(target_dates, times_list):
+        if times is None:
+            result.setdefault("_failed_dates", []).append(date_val)
+            continue
         if times:
+            CRAWL_STATS["time_ok"] += 1
             result[date_val] = times
+        else:
+            CRAWL_STATS["time_empty"] += 1
 
     return result
 
@@ -213,6 +243,9 @@ async def fetch_availability(session, rid, title="", sem=None):
 # 전체 실행
 # --------------------------------------------------------------
 async def run_all_async():
+    for key in CRAWL_STATS:
+        CRAWL_STATS[key] = 0
+
     async with aiohttp.ClientSession(
         connector=get_connector(),
         headers=HEADERS
@@ -232,7 +265,8 @@ async def run_all_async():
         )
         print(
             f"[INFO] Yongin time requests={request_count} "
-            f"concurrency={get_time_concurrency()} timeout={get_time_request_timeout():.1f}s"
+            f"concurrency={get_time_concurrency()} timeout={get_time_request_timeout():.1f}s "
+            f"retries={get_time_request_retries()}"
         )
         tasks = [
             fetch_availability(session, rid, meta.get("title", ""), sem)
@@ -240,11 +274,22 @@ async def run_all_async():
         ]
         results = await asyncio.gather(*tasks)
 
-        availability = {
-            rid: data
-            for (rid, _), data in zip(facilities.items(), results)
-            if data
-        }
+        failed_dates = sum(len(data.get("_failed_dates", [])) for data in results if data)
+        CRAWL_STATS["time_failed"] = failed_dates
+        availability = {}
+        for (rid, _), data in zip(facilities.items(), results):
+            if not data:
+                continue
+            clean_data = {k: v for k, v in data.items() if k != "_failed_dates"}
+            if clean_data:
+                availability[rid] = clean_data
+
+        print(
+            "[YONGIN][STATS] "
+            f"facilities={len(facilities)} with_slots={len(availability)} "
+            f"ok_dates={CRAWL_STATS['time_ok']} empty_dates={CRAWL_STATS['time_empty']} "
+            f"failed_dates={CRAWL_STATS['time_failed']} retried={CRAWL_STATS['time_retried']}"
+        )
 
         return facilities, availability
 

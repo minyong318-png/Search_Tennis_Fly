@@ -1058,14 +1058,26 @@ def main() -> None:
     if protect_seongnam_cache:
         print("[SEONGNAM][SAFEGUARD] slots=0; keep existing seongnam cache")
 
+    yongin_failed_dates = int(getattr(tennis_core, "CRAWL_STATS", {}).get("time_failed", 0) or 0)
+    yongin_slots = count_slots_for_prefix(availability, "yongin:")
+    protect_yongin_cache = target in ("all", "yongin") and (yongin_failed_dates > 0 or yongin_slots == 0)
+    if protect_yongin_cache:
+        reason = f"failed_dates={yongin_failed_dates}" if yongin_failed_dates > 0 else "slots=0"
+        print(f"[YONGIN][SAFEGUARD] {reason}; keep existing yongin cache")
+
     facilities_for_write = facilities
     availability_for_write = availability
     clear_target = target
+    if protect_yongin_cache:
+        facilities_for_write = {k: v for k, v in facilities_for_write.items() if not str(k).startswith("yongin:")}
+        availability_for_write = {k: v for k, v in availability_for_write.items() if not str(k).startswith("yongin:")}
     if protect_goyang_cache:
         facilities_for_write = {k: v for k, v in facilities_for_write.items() if not str(k).startswith("goyang:")}
         availability_for_write = {k: v for k, v in availability_for_write.items() if not str(k).startswith("goyang:")}
 
     excluded_cache_prefixes = []
+    if protect_yongin_cache:
+        excluded_cache_prefixes.append("yongin:")
     if protect_goyang_cache:
         excluded_cache_prefixes.append("goyang:")
     if protect_suwon_cache:
