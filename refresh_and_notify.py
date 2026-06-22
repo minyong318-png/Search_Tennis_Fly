@@ -356,7 +356,11 @@ def crawl_all() -> Tuple[Dict[str, Any], Dict[str, Dict[str, List[Any]]]]:
     # (A) 용인 (tennis_core)
     # -----------------------------
     if target in ("all", "yongin"):
-        y_fac, y_av = tennis_core.run_all()
+        set_crawl_exit_node("YONGIN", True)
+        try:
+            y_fac, y_av = tennis_core.run_all()
+        finally:
+            set_crawl_exit_node("YONGIN", False)
 
         for rid, meta in (y_fac or {}).items():
             rid = str(rid)
