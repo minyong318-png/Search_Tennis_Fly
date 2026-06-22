@@ -1,10 +1,15 @@
 import aiohttp
 import asyncio
 import re
+import requests
+import threading
 from bs4 import BeautifulSoup
 from datetime import datetime, timedelta
 import calendar
 import os
+import urllib3
+
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # 테니스 시설 목록 endpoint
 BASE_URL = "https://publicsports.yongin.go.kr/publicsports/sports/selectFcltyRceptResveListU.do"
@@ -48,6 +53,17 @@ CRAWL_STATS = {
     "time_failed": 0,
     "time_retried": 0,
 }
+
+_thread_local = threading.local()
+
+
+def _requests_session():
+    session = getattr(_thread_local, "session", None)
+    if session is None:
+        session = requests.Session()
+        session.headers.update(HEADERS)
+        _thread_local.session = session
+    return session
 
 
 # --------------------------------------------------------------
@@ -156,23 +172,14 @@ async def fetch_facilities(session):
 # ② 날짜별 시간 조회
 # --------------------------------------------------------------
 async def fetch_times(session, date_val, rid, sem=None):
-    url = "https://publicsports.yongin.go.kr/publicsports/sports/selectRegistTimeByChosenDateFcltyRceptResveApply.do"
-    data = {"dateVal": date_val, "resveId": rid}
-    timeout = aiohttp.ClientTimeout(total=get_time_request_timeout())
     attempts = get_time_request_retries() + 1
 
     for attempt in range(attempts):
         try:
             if sem:
                 async with sem:
-                    async with session.post(url, data=data, timeout=timeout) as resp:
-                        resp.raise_for_status()
-                        j = await resp.json(content_type=None)
-                        return j.get("resveTmList", [])
-            async with session.post(url, data=data, timeout=timeout) as resp:
-                resp.raise_for_status()
-                j = await resp.json(content_type=None)
-                return j.get("resveTmList", [])
+                    return await asyncio.to_thread(fetch_times_sync, date_val, rid)
+            return await asyncio.to_thread(fetch_times_sync, date_val, rid)
         except Exception:
             if attempt < attempts - 1:
                 CRAWL_STATS["time_retried"] += 1
@@ -180,6 +187,18 @@ async def fetch_times(session, date_val, rid, sem=None):
                 continue
             return None
     return None
+
+
+def fetch_times_sync(date_val, rid):
+    url = "https://publicsports.yongin.go.kr/publicsports/sports/selectRegistTimeByChosenDateFcltyRceptResveApply.do"
+    response = _requests_session().post(
+        url,
+        data={"dateVal": date_val, "resveId": rid},
+        timeout=get_time_request_timeout(),
+        verify=False,
+    )
+    response.raise_for_status()
+    return response.json().get("resveTmList", [])
 
 
 def get_facility_month(title):
