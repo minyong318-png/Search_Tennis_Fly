@@ -19,8 +19,8 @@ _thread_local = threading.local()
 
 def _session() -> requests.Session:
     retry = Retry(
-        total=4,
-        backoff_factor=0.8,
+        total=2,
+        backoff_factor=0.4,
         status_forcelist=[429, 500, 502, 503, 504],
         allowed_methods=frozenset(["GET", "POST"]),
     )
@@ -28,6 +28,14 @@ def _session() -> requests.Session:
     session.mount("https://", HTTPAdapter(max_retries=retry))
     session.headers.update({"User-Agent": "Mozilla/5.0 tennis-availability-crawler"})
     return session
+
+
+def _request_timeout() -> float:
+    raw = (os.getenv("SEONGNAM_TIMEOUT") or "8").strip()
+    try:
+        return max(2.0, min(float(raw), 20.0))
+    except ValueError:
+        return 8.0
 
 
 def _clean_text(value: str) -> str:
@@ -42,11 +50,11 @@ def _login(session: requests.Session) -> bool:
         return False
 
     try:
-        session.get(f"{BASE_URL}/login.do", timeout=20).raise_for_status()
+        session.get(f"{BASE_URL}/login.do", timeout=_request_timeout()).raise_for_status()
         response = session.post(
             f"{BASE_URL}/rest_loginCheck.do",
             data={"web_id": user_id, "web_pw": password},
-            timeout=20,
+            timeout=_request_timeout(),
         )
         response.raise_for_status()
     except requests.RequestException as exc:
@@ -54,7 +62,7 @@ def _login(session: requests.Session) -> bool:
         return False
     success = response.text.strip() == "success"
     if success:
-        session.get(LIST_URL, timeout=20).raise_for_status()
+        session.get(LIST_URL, timeout=_request_timeout()).raise_for_status()
     print(f"[SEONGNAM][AUTH] login={'ok' if success else 'fail'}")
     return success
 
@@ -92,11 +100,11 @@ def _days_ahead() -> int:
 
 
 def _max_workers() -> int:
-    raw = (os.getenv("SEONGNAM_MAX_WORKERS") or "8").strip()
+    raw = (os.getenv("SEONGNAM_MAX_WORKERS") or "16").strip()
     try:
-        return max(1, min(int(raw), 16))
+        return max(1, min(int(raw), 32))
     except ValueError:
-        return 8
+        return 16
 
 
 def _thread_session() -> requests.Session:
@@ -120,7 +128,7 @@ def _crawl_court(session: requests.Session, fac_id: str, days_ahead: int) -> Dic
                 "POST",
                 "getTimeTableByDate.do",
                 data={"facId": fac_id, "resdate": request_date},
-                timeout=20,
+                timeout=_request_timeout(),
             )
             daymap[yyyymmdd] = _parse_timetable(timetable.text)
         except Exception as exc:
@@ -142,7 +150,7 @@ def crawl_seongnam() -> Dict[str, Any]:
     login_required = not _login(session)
 
     try:
-        response = session.get(LIST_URL, timeout=20)
+        response = session.get(LIST_URL, timeout=_request_timeout())
         response.raise_for_status()
         group_ids = sorted(set(re.findall(r'name=["\']groupId["\']\s+value=["\'](\d+)["\']', response.text)))
         group_titles = {
@@ -161,7 +169,7 @@ def crawl_seongnam() -> Dict[str, Any]:
 
     for group_id in group_ids:
         try:
-            response = session.post(f"{BASE_URL}/tennisList.do", data={"groupId": group_id}, timeout=20)
+            response = session.post(f"{BASE_URL}/tennisList.do", data={"groupId": group_id}, timeout=_request_timeout())
             response.raise_for_status()
             items = re.findall(
                 r'<li\s+id=["\'](FAC\d+)["\'][^>]*class=["\']facilityInfo["\'].*?'

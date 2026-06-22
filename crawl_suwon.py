@@ -1,4 +1,5 @@
 import re
+import os
 from datetime import date, timedelta
 from typing import Any, Dict, List
 
@@ -16,8 +17,8 @@ RESERVE_URL = (
 
 def _session() -> requests.Session:
     retry = Retry(
-        total=4,
-        backoff_factor=0.8,
+        total=2,
+        backoff_factor=0.4,
         status_forcelist=[429, 500, 502, 503, 504],
         allowed_methods=frozenset(["GET"]),
     )
@@ -25,6 +26,14 @@ def _session() -> requests.Session:
     session.mount("https://", HTTPAdapter(max_retries=retry))
     session.headers.update({"User-Agent": "Mozilla/5.0 tennis-availability-crawler"})
     return session
+
+
+def _request_timeout() -> float:
+    try:
+        value = float(os.getenv("SUWON_TIMEOUT", "8"))
+    except ValueError:
+        value = 8.0
+    return max(2.0, min(value, 20.0))
 
 
 def _month_starts(start: date, end: date) -> List[date]:
@@ -82,7 +91,7 @@ def crawl_suwon(days_ahead: int = 45) -> Dict[str, Any]:
                     "menuNo": "20",
                     "facilityCategoryNo": "1",
                 },
-                timeout=20,
+                timeout=_request_timeout(),
             )
             response.raise_for_status()
             parsed = _parse_month(response.text, month_start.year, month_start.month, start, end)

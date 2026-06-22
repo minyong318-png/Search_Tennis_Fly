@@ -31,6 +31,22 @@ TIME_RE = re.compile(r"(\d{1,2}:\d{2})\s*[~\-]\s*(\d{1,2}:\d{2})")
 KST = dt.timezone(dt.timedelta(hours=9))
 
 
+def _bounded_float_env(name: str, default: float, min_value: float = 2.0, max_value: float = 20.0) -> float:
+    try:
+        value = float((os.getenv(name) or str(default)).strip())
+    except ValueError:
+        value = default
+    return max(min_value, min(value, max_value))
+
+
+def _gyt_timeout() -> float:
+    return _bounded_float_env("GYT_TIMEOUT", 8.0)
+
+
+def _gys_timeout() -> float:
+    return _bounded_float_env("GYS_TIMEOUT", 8.0)
+
+
 def kst_now() -> dt.datetime:
     return dt.datetime.now(tz=KST)
 
@@ -216,13 +232,13 @@ def fetch_gytennis_day(
         if prefer_curl and curl_requests is not None:
             return curl_requests.get(
                 u,
-                timeout=20,
+                timeout=_gyt_timeout(),
                 verify=(not insecure),
                 impersonate="chrome",
                 headers=req_headers,
                 proxy=(proxy_url or None),
             )
-        return session.get(u, timeout=20, verify=(not insecure), headers=req_headers)
+        return session.get(u, timeout=_gyt_timeout(), verify=(not insecure), headers=req_headers)
 
     def _post(u: str, data: dict, insecure: bool):
         _count_request("post")
@@ -230,13 +246,13 @@ def fetch_gytennis_day(
             return curl_requests.post(
                 u,
                 data=data,
-                timeout=20,
+                timeout=_gyt_timeout(),
                 verify=(not insecure),
                 impersonate="chrome",
                 headers={**req_headers, "Referer": u},
                 proxy=(proxy_url or None),
             )
-        return session.post(u, data=data, timeout=20, verify=(not insecure), headers={**req_headers, "Referer": u})
+        return session.post(u, data=data, timeout=_gyt_timeout(), verify=(not insecure), headers={**req_headers, "Referer": u})
 
     def _valid_slots_html(h: str) -> bool:
         if not h:
@@ -337,12 +353,12 @@ def warmup_gytennis_session(session: requests.Session, ssl_fallback_state: dict)
     for url in ("https://www.gytennis.or.kr/", "https://www.gytennis.or.kr/daily"):
         use_insecure = bool(ssl_fallback_state.get("use_insecure"))
         try:
-            session.get(url, timeout=20, verify=(not use_insecure), headers={"Referer": "https://www.gytennis.or.kr/"})
+            session.get(url, timeout=_gyt_timeout(), verify=(not use_insecure), headers={"Referer": "https://www.gytennis.or.kr/"})
         except requests.exceptions.SSLError as e:
             ssl_fallback_state["use_insecure"] = True
             print(f"[GYT][SSL_WARN] switch to verify=False during warmup: url={url} err={e}")
             try:
-                session.get(url, timeout=20, verify=False, headers={"Referer": "https://www.gytennis.or.kr/"})
+                session.get(url, timeout=_gyt_timeout(), verify=False, headers={"Referer": "https://www.gytennis.or.kr/"})
             except requests.RequestException as e2:
                 print(f"[GYT][WARMUP_WARN] verify=False warmup failed: url={url} err={e2}")
         except requests.RequestException as e:
@@ -387,7 +403,7 @@ def crawl_gytennis() -> dict:
                     use_insecure = bool(ssl_fallback_state.get("use_insecure"))
                     r = s.get(
                         url,
-                        timeout=20,
+                        timeout=_gyt_timeout(),
                         verify=(not use_insecure),
                         headers={
                             "User-Agent": UA,
@@ -399,7 +415,7 @@ def crawl_gytennis() -> dict:
                     ssl_fallback_state["use_insecure"] = True
                     r = s.get(
                         url,
-                        timeout=20,
+                        timeout=_gyt_timeout(),
                         verify=False,
                         headers={
                             "User-Agent": UA,
@@ -551,7 +567,7 @@ def login_daehwa(s: requests.Session, ssl_fallback_state: dict) -> None:
     if not user_id or not user_pw:
         raise RuntimeError("Set env vars GYS_ID / GYS_PW for daehwa login")
 
-    r0 = _daehwa_get(s, DAEHWA_LOGIN, ssl_fallback_state, allow_redirects=True, timeout=20)
+    r0 = _daehwa_get(s, DAEHWA_LOGIN, ssl_fallback_state, allow_redirects=True, timeout=_gys_timeout())
     html0 = fix_encoding(r0)
 
     if not is_login_page(html0, r0.url):
@@ -601,7 +617,7 @@ def login_daehwa(s: requests.Session, ssl_fallback_state: dict) -> None:
         ssl_fallback_state=ssl_fallback_state,
         data=payload,
         allow_redirects=True,
-        timeout=20,
+        timeout=_gys_timeout(),
         headers={"Origin": DAEHWA_BASE, "Referer": r0.url},
     )
     html1 = fix_encoding(r1)
@@ -710,7 +726,7 @@ def post_rent(s: requests.Session, payload: Dict[str, str], ssl_fallback_state: 
         ssl_fallback_state=ssl_fallback_state,
         data=payload,
         allow_redirects=True,
-        timeout=25,
+        timeout=_gys_timeout(),
         headers={"Origin": DAEHWA_BASE, "Referer": DAEHWA_RENT},
     )
     html = fix_encoding(r)
@@ -794,7 +810,7 @@ def login_baekseok(session) -> None:
     returl = f"{BAEKSEOK_BASE}/member/login.php?preURL=%2Frent%2Ftennis_rent.php%3Fpart_opt%3D{BAEKSEOK_PART_OPT}"
     login_url = f"https://yeyak.gys.or.kr/fmcs/27?referer={quote(returl, safe='')}&login_check=skip"
 
-    r0 = session.get(login_url, timeout=25, verify=False)
+    r0 = session.get(login_url, timeout=_gys_timeout(), verify=False)
     html0 = _curl_text(r0)
     soup = BeautifulSoup(html0, "lxml")
     form = soup.select_one("form#memberLoginForm")
@@ -810,7 +826,7 @@ def login_baekseok(session) -> None:
     payload["userPassword"] = user_pw
 
     post_url = urljoin(getattr(r0, "url", login_url), form.get("action") or "")
-    r1 = session.post(post_url, data=payload, timeout=25, verify=False, allow_redirects=True)
+    r1 = session.post(post_url, data=payload, timeout=_gys_timeout(), verify=False, allow_redirects=True)
     html1 = _curl_text(r1)
     soup1 = BeautifulSoup(html1, "lxml")
 
@@ -831,7 +847,7 @@ def login_baekseok(session) -> None:
     session.post(
         sso_url,
         data=sso_payload,
-        timeout=25,
+        timeout=_gys_timeout(),
         verify=False,
         allow_redirects=True,
         headers={"Origin": "https://yeyak.gys.or.kr", "Referer": getattr(r1, "url", login_url)},
@@ -842,7 +858,7 @@ def _baekseok_post(session, payload: Dict[str, str]):
     return session.post(
         BAEKSEOK_RENT,
         data=payload,
-        timeout=25,
+        timeout=_gys_timeout(),
         verify=False,
         allow_redirects=True,
         headers={"Origin": BAEKSEOK_BASE, "Referer": f"{BAEKSEOK_RENT}?part_opt={BAEKSEOK_PART_OPT}"},
