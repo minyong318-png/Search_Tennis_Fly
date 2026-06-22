@@ -196,13 +196,6 @@ def refresh():
         print("[ERROR] crawl failed", e)
         return "crawl failed", 500
 
-    try:
-        save_frontend_cache(facilities, availability)
-    except Exception as e:
-        print("[ERROR] frontend cache save failed", e)
-        traceback.print_exc()
-        return "cache save failed", 500
-
     # 🔥 테스트 모드: ?test=1
     if request.args.get("test") == "1":
         inject_test_slot_1(facilities, availability)
@@ -514,57 +507,6 @@ def crawl_all():
     # 앱 라우트(/data, /refresh)도 워커/액션과 동일한 통합 크롤러를 사용한다.
     # refresh_and_notify.crawl_all()은 RUN_TARGET 기준으로 용인/고양/전체를 처리한다.
     return refresh_and_notify.crawl_all()
-
-
-def save_frontend_cache(facilities, availability):
-    """Pages가 읽는 Supabase 프론트 캐시를 /refresh 결과로 갱신한다."""
-    target = (os.getenv("RUN_TARGET") or "all").strip().lower()
-
-    protected_prefixes = []
-    if target in ("all", "goyang") and refresh_and_notify.count_slots_for_prefix(availability, "goyang:gytennis:") == 0:
-        protected_prefixes.append("goyang:")
-        print("[GOYANG][SAFEGUARD] gytennis slots=0; keep existing goyang cache")
-    if target in ("all", "suwon") and refresh_and_notify.count_slots_for_prefix(availability, "suwon:") == 0:
-        protected_prefixes.append("suwon:")
-        print("[SUWON][SAFEGUARD] slots=0; keep existing suwon cache")
-    if target in ("all", "seongnam") and refresh_and_notify.count_slots_for_prefix(availability, "seongnam:") == 0:
-        protected_prefixes.append("seongnam:")
-        print("[SEONGNAM][SAFEGUARD] slots=0; keep existing seongnam cache")
-
-    facilities_for_write = {
-        str(k): v
-        for k, v in (facilities or {}).items()
-        if not any(str(k).startswith(prefix) for prefix in protected_prefixes)
-    }
-    availability_for_write = {
-        str(k): v
-        for k, v in (availability or {}).items()
-        if not any(str(k).startswith(prefix) for prefix in protected_prefixes)
-    }
-
-    with refresh_and_notify.psycopg.connect(DATABASE_URL) as conn:
-        refresh_and_notify.ensure_extra_schema(conn)
-        mm = refresh_and_notify.compute_minmax_yyyymmdd(availability_for_write)
-        if mm:
-            start_ymd, end_ymd = mm
-            print(f"[CACHE] clear target={target} range={start_ymd}~{end_ymd}")
-            refresh_and_notify.clear_availability_cache_for_target(
-                conn,
-                target,
-                start_ymd,
-                end_ymd,
-                keep_yongin_today=(target in ("all", "yongin")),
-                exclude_prefixes=protected_prefixes,
-            )
-        else:
-            print("[CACHE] skip clear: no dates in availability")
-        refresh_and_notify.upsert_facilities_for_frontend(conn, facilities_for_write)
-        refresh_and_notify.upsert_availability_cache_for_frontend(
-            conn,
-            facilities_for_write,
-            availability_for_write,
-            keep_yongin_today=(target in ("all", "yongin")),
-        )
 
 # =========================
 def make_reserve_link(resve_id):
