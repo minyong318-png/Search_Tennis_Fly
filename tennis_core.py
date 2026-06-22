@@ -4,6 +4,7 @@ import re
 from bs4 import BeautifulSoup
 from datetime import datetime, timedelta
 import calendar
+import os
 
 # 테니스 시설 목록 endpoint
 BASE_URL = "https://publicsports.yongin.go.kr/publicsports/sports/selectFcltyRceptResveListU.do"
@@ -15,6 +16,14 @@ HEADERS = {
 
 def get_connector():
     return aiohttp.TCPConnector(limit=60, ssl=False)
+
+
+def get_time_concurrency():
+    try:
+        value = int(os.getenv("YONGIN_TIME_CONCURRENCY", "40"))
+    except ValueError:
+        value = 40
+    return max(1, min(value, 80))
 
 
 # --------------------------------------------------------------
@@ -122,11 +131,16 @@ async def fetch_facilities(session):
 # --------------------------------------------------------------
 # ② 날짜별 시간 조회
 # --------------------------------------------------------------
-async def fetch_times(session, date_val, rid):
+async def fetch_times(session, date_val, rid, sem=None):
     url = "https://publicsports.yongin.go.kr/publicsports/sports/selectRegistTimeByChosenDateFcltyRceptResveApply.do"
     data = {"dateVal": date_val, "resveId": rid}
 
     try:
+        if sem:
+            async with sem:
+                async with session.post(url, data=data) as resp:
+                    j = await resp.json()
+                    return j.get("resveTmList", [])
         async with session.post(url, data=data) as resp:
             j = await resp.json()
             return j.get("resveTmList", [])
@@ -134,46 +148,53 @@ async def fetch_times(session, date_val, rid):
         return []
 
 
+def get_facility_month(title):
+    m = re.search(r"_(\d{1,2})월\s*$", title or "")
+    if not m:
+        return None
+    month = int(m.group(1))
+    return month if 1 <= month <= 12 else None
+
+
+def build_target_dates(title, start):
+    facility_month = get_facility_month(title)
+
+    y, m = start.year, start.month
+    current_dates = [
+        f"{y}{m:02d}{d:02d}"
+        for d in range(start.day, calendar.monthrange(y, m)[1] + 1)
+    ]
+
+    next_dt = start.replace(day=1) + timedelta(days=32)
+    ny, nm = next_dt.year, next_dt.month
+    next_dates = [
+        f"{ny}{nm:02d}{d:02d}"
+        for d in range(1, calendar.monthrange(ny, nm)[1] + 1)
+    ]
+
+    if facility_month == m:
+        return current_dates
+    if facility_month == nm:
+        return next_dates
+    return current_dates + next_dates
+
+
 # --------------------------------------------------------------
 # ③ 내일 ~ 다음달 끝까지
 # --------------------------------------------------------------
-async def fetch_availability(session, rid):
+async def fetch_availability(session, rid, title="", sem=None):
     today = datetime.today()
     start = today + timedelta(days=1)  # ★ 오늘 제외
 
     result = {}
-
-    y, m = start.year, start.month
-    last_this = calendar.monthrange(y, m)[1]
-
-    next_dt = start.replace(day=1) + timedelta(days=32)
-    ny, nm = next_dt.year, next_dt.month
-    last_next = calendar.monthrange(ny, nm)[1]
-
-    tasks = []
-
-    # 이번달
-    for d in range(start.day, last_this + 1):
-        tasks.append(fetch_times(session, f"{y}{m:02d}{d:02d}", rid))
-
-    # 다음달
-    for d in range(1, last_next + 1):
-        tasks.append(fetch_times(session, f"{ny}{nm:02d}{d:02d}", rid))
+    target_dates = build_target_dates(title, start)
+    tasks = [fetch_times(session, date_val, rid, sem) for date_val in target_dates]
 
     times_list = await asyncio.gather(*tasks)
 
-    idx = 0
-    for d in range(start.day, last_this + 1):
-        key = f"{y}{m:02d}{d:02d}"
-        if times_list[idx]:
-            result[key] = times_list[idx]
-        idx += 1
-
-    for d in range(1, last_next + 1):
-        key = f"{ny}{nm:02d}{d:02d}"
-        if times_list[idx]:
-            result[key] = times_list[idx]
-        idx += 1
+    for date_val, times in zip(target_dates, times_list):
+        if times:
+            result[date_val] = times
 
     return result
 
@@ -194,7 +215,16 @@ async def run_all_async():
         facilities = await fetch_facilities(session)
 
         # ★ 3) 각 시설 날짜 데이터 병렬 처리
-        tasks = [fetch_availability(session, rid) for rid in facilities]
+        sem = asyncio.Semaphore(get_time_concurrency())
+        request_count = sum(
+            len(build_target_dates(meta.get("title", ""), datetime.today() + timedelta(days=1)))
+            for meta in facilities.values()
+        )
+        print(f"[INFO] Yongin time requests={request_count} concurrency={get_time_concurrency()}")
+        tasks = [
+            fetch_availability(session, rid, meta.get("title", ""), sem)
+            for rid, meta in facilities.items()
+        ]
         results = await asyncio.gather(*tasks)
 
         availability = {
