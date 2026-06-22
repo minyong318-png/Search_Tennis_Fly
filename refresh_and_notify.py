@@ -31,6 +31,8 @@ def kst_today_yyyymmdd() -> str:
 
 
 def is_goyang_crawl_window() -> bool:
+    if (os.getenv("FORCE_GOYANG_CRAWL") or "").strip().lower() in ("1", "true", "yes", "y"):
+        return True
     now = datetime.now(KST)
     return 5 <= now.hour < 22
 

@@ -2,6 +2,11 @@
 
 on:
   workflow_dispatch:
+    inputs:
+      force:
+        description: "Run Goyang crawl outside the KST 05:00~22:00 window"
+        required: false
+        default: "false"
 
 concurrency:
   group: tennis-crawl-goyang
@@ -39,6 +44,7 @@ jobs:
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           RUN_TARGET: "goyang"
+          FORCE_GOYANG_CRAWL: ${{ inputs.force }}
           GYT_TAILSCALE_EXIT_NODE: "100.120.193.30"
           GYT_USE_CURL_CFFI: "1"
           GYT_DEBUG_DUMP: "1"
