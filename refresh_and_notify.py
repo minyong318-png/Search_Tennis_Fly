@@ -654,20 +654,20 @@ def prune_stale_yongin_facilities(
             cur.execute(
                 """
                 delete from public.slots_snapshot
-                 where facility_id like 'yongin:%'
+                 where facility_id like %s
                    and not (facility_id = any(%s))
                 """,
-                (keep_ids,),
+                ("yongin:%", keep_ids),
             )
             deleted_snapshots = cur.rowcount
 
         cur.execute(
             """
             delete from public.facilities
-             where facility_id like 'yongin:%'
+             where facility_id like %s
                and not (facility_id = any(%s))
             """,
-            (keep_ids,),
+            ("yongin:%", keep_ids),
         )
         deleted_facilities = cur.rowcount
 
