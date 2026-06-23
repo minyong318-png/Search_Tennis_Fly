@@ -510,7 +510,7 @@ def crawl_gytennis() -> dict:
                 f"[GYT][REQUESTS] get={ssl_fallback_state.get('_request_get', 0)} "
                 f"post={ssl_fallback_state.get('_request_post', 0)}"
             )
-            return {"facilities": facilities, "availability": availability}
+            return {"facilities": facilities, "availability": availability, "partial_failure": True}
 
     futures = []
     with ThreadPoolExecutor(max_workers=6) as ex:
@@ -537,7 +537,7 @@ def crawl_gytennis() -> dict:
         f"post={ssl_fallback_state.get('_request_post', 0)}"
     )
 
-    return {"facilities": facilities, "availability": availability}
+    return {"facilities": facilities, "availability": availability, "partial_failure": stats["fail"] > 0}
 
 
 DAEHWA_BASE = "https://daehwa.gys.or.kr:451"
@@ -903,17 +903,28 @@ def crawl_baekseok() -> dict:
     session = curl_requests.Session(impersonate="chrome")
     session.headers.update({"User-Agent": UA, "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8"})
 
-    try:
-        login_baekseok(session)
-    except Exception as e:
+    login_error: Exception | None = None
+    for attempt in range(1, 4):
+        try:
+            login_baekseok(session)
+            login_error = None
+            break
+        except Exception as e:
+            login_error = e
+            if attempt < 3:
+                print(f"[BAEKSEOK][RETRY] login attempt={attempt} err={e}")
+                session = curl_requests.Session(impersonate="chrome")
+                session.headers.update({"User-Agent": UA, "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8"})
+
+    if login_error is not None:
         stats["fail"] += 1
         stats["login_required"] += 1
-        print(f"[BAEKSEOK][ERR] login failed: {e}")
+        print(f"[BAEKSEOK][ERR] login failed: {login_error}")
         print(
             f"[BAEKSEOK][STAT] total={stats['total']} ok={stats['ok']} empty={stats['empty']} "
             f"fail={stats['fail']} login_required={stats['login_required']}"
         )
-        return {"facilities": facilities, "availability": availability}
+        return {"facilities": facilities, "availability": availability, "partial_failure": True}
 
     # 백석은 URL의 part_opt=07로 시설이 고정된다. place_opt는 비워 먼저 조회하고,
     # 화면에 코트별 place_opt가 노출되면 그 값을 추가로 순회한다.
@@ -969,7 +980,7 @@ def crawl_baekseok() -> dict:
                         f"[BAEKSEOK][STAT] total={stats['total']} ok={stats['ok']} empty={stats['empty']} "
                         f"fail={stats['fail']} login_required={stats['login_required']}"
                     )
-                    return {"facilities": facilities, "availability": availability}
+                    return {"facilities": facilities, "availability": availability, "partial_failure": True}
 
         if day_slots:
             availability[facility_id].setdefault(ymd, []).extend(day_slots)
@@ -978,7 +989,7 @@ def crawl_baekseok() -> dict:
         f"[BAEKSEOK][STAT] total={stats['total']} ok={stats['ok']} empty={stats['empty']} "
         f"fail={stats['fail']} login_required={stats['login_required']}"
     )
-    return {"facilities": facilities, "availability": availability}
+    return {"facilities": facilities, "availability": availability, "partial_failure": stats["fail"] > 0}
 
 
 def merge(a: dict, b: dict) -> dict:

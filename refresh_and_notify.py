@@ -376,6 +376,7 @@ def crawl_all() -> Tuple[Dict[str, Any], Dict[str, Dict[str, List[Any]]]]:
     # (B) 고양 (crawl_goyang)
     # -----------------------------
     if target in ("all", "goyang") and is_goyang_crawl_window():
+        crawl_goyang.LAST_PARTIAL_FAILURE = False
         started = time.perf_counter()
         set_crawl_exit_node("GYT", True)
         try:
@@ -391,7 +392,7 @@ def crawl_all() -> Tuple[Dict[str, Any], Dict[str, Dict[str, List[Any]]]]:
             print(f"[DAEHWA][ELAPSED] seconds={time.perf_counter() - started:.2f}")
         except Exception as e:
             print("[DAEHWA] skipped:", e)
-            out_g2 = {"facilities": {}, "availability": {}}
+            out_g2 = {"facilities": {}, "availability": {}, "partial_failure": True}
 
         try:
             started = time.perf_counter()
@@ -399,7 +400,7 @@ def crawl_all() -> Tuple[Dict[str, Any], Dict[str, Dict[str, List[Any]]]]:
             print(f"[BAEKSEOK][ELAPSED] seconds={time.perf_counter() - started:.2f}")
         except Exception as e:
             print("[BAEKSEOK] skipped:", e)
-            out_g3 = {"facilities": {}, "availability": {}}
+            out_g3 = {"facilities": {}, "availability": {}, "partial_failure": True}
 
         g_fac = {
             **out_g1.get("facilities", {}),
@@ -411,6 +412,9 @@ def crawl_all() -> Tuple[Dict[str, Any], Dict[str, Dict[str, List[Any]]]]:
             **out_g2.get("availability", {}),
             **out_g3.get("availability", {}),
         }
+        crawl_goyang.LAST_PARTIAL_FAILURE = any(
+            bool(out.get("partial_failure")) for out in (out_g1, out_g2, out_g3)
+        )
 
         # -------------------------------------------------
         # 고양 base meta 확보 (코트별 분리 시 title 생성용)
@@ -1048,9 +1052,11 @@ def main() -> None:
     # ✅ 이번 실행 타겟/기간에 해당하는 캐시를 먼저 비워두고(빈 배열),
     #    아래 upsert에서 다시 채운다.
     goyang_slots = count_slots_for_prefix(availability, "goyang:gytennis:")
-    protect_goyang_cache = target in ("all", "goyang") and goyang_slots == 0
+    goyang_partial_failure = bool(getattr(crawl_goyang, "LAST_PARTIAL_FAILURE", False))
+    protect_goyang_cache = target in ("all", "goyang") and (goyang_slots == 0 or goyang_partial_failure)
     if protect_goyang_cache:
-        print("[GOYANG][SAFEGUARD] gytennis slots=0; keep existing goyang cache")
+        reason = "partial_failure" if goyang_partial_failure else "gytennis slots=0"
+        print(f"[GOYANG][SAFEGUARD] {reason}; keep existing goyang cache")
 
     suwon_slots = count_slots_for_prefix(availability, "suwon:")
     protect_suwon_cache = target in ("all", "suwon") and suwon_slots == 0
