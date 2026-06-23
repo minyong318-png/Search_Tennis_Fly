@@ -178,11 +178,12 @@ def parse_gytennis_slots(html: str) -> Dict[str, List[dict]]:
             if not td:
                 continue
 
-            # 사이트에서 예약 가능 체크박스 name이 수시로 바뀌므로
-            # disabled가 아닌 checkbox 기준으로 가용 슬롯을 판단한다.
-            avail_cb = td.select_one('input[type="checkbox"]:not([disabled])')
-            if not avail_cb:
-                continue
+            # gytennis는 비로그인 현황 화면에서 빈 슬롯을 public-empty-slot으로 표시한다.
+            if not td.select_one("span.public-empty-slot"):
+                # 예전 로그인/예약 화면 호환: 활성 checkbox가 있으면 가용 슬롯으로 본다.
+                avail_cb = td.select_one('input[type="checkbox"]:not([disabled])')
+                if not avail_cb:
+                    continue
 
             label = time_labels[idx] if idx < len(time_labels) else f"IDX:{idx}"
             if "~" in label:
@@ -425,7 +426,9 @@ def crawl_gytennis() -> dict:
                     )
                 html = fix_encoding(r)
                 soup = BeautifulSoup(html, "lxml")
-                enabled = len(soup.select('td.resTag input[type="checkbox"]:not([disabled])'))
+                enabled = len(soup.select("td.resTag span.public-empty-slot")) + len(
+                    soup.select('td.resTag input[type="checkbox"]:not([disabled])')
+                )
                 has_redirect = "location.replace('https://www.gytennis.or.kr')" in html
                 name = f"{tag}_cv{cv}_{ymd}.html"
                 (out_dir / name).write_text(html, encoding="utf-8")
