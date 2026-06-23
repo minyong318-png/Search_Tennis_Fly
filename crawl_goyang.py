@@ -445,20 +445,33 @@ def crawl_gytennis() -> dict:
             warmup_gytennis_session(worker_local.session, ssl_fallback_state)
         return worker_local.session
 
+    def _reset_worker_session() -> requests.Session:
+        worker_local.session = make_gytennis_session()
+        worker_local.generation = session_generation["value"]
+        warmup_gytennis_session(worker_local.session, ssl_fallback_state)
+        return worker_local.session
+
     def _task(cv: int, ymd: str) -> Tuple[int, str, str, List[dict]]:
-        try:
-            court_slots = fetch_gytennis_day(_worker_session(), cv, ymd, ssl_fallback_state)
-            if not court_slots:
-                return cv, ymd, "empty", []
-            flat: List[dict] = []
-            for _, slots in court_slots.items():
-                flat.extend(slots)
-            if not flat:
-                return cv, ymd, "empty", []
-            return cv, ymd, "ok", flat
-        except Exception as e:
-            print(f"[GYT][ERR] cv={cv} date={ymd} err={e}")
-            return cv, ymd, "fail", []
+        last_err: Exception | None = None
+        for attempt in range(1, 4):
+            try:
+                session = _worker_session() if attempt == 1 else _reset_worker_session()
+                court_slots = fetch_gytennis_day(session, cv, ymd, ssl_fallback_state)
+                if not court_slots:
+                    return cv, ymd, "empty", []
+                flat: List[dict] = []
+                for _, slots in court_slots.items():
+                    flat.extend(slots)
+                if not flat:
+                    return cv, ymd, "empty", []
+                return cv, ymd, "ok", flat
+            except Exception as e:
+                last_err = e
+                if attempt < 3:
+                    print(f"[GYT][RETRY] cv={cv} date={ymd} attempt={attempt} err={e}")
+                else:
+                    print(f"[GYT][ERR] cv={cv} date={ymd} err={last_err}")
+        return cv, ymd, "fail", []
 
     def _probe_session(sample_size: int = 5) -> bool:
         # 오늘 슬롯이 모두 찬 경우를 차단으로 오판하지 않도록 미래 날짜를 먼저 확인한다.
