@@ -1,0 +1,86 @@
+name: Crawl Local Fallback & Notify
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "City target to crawl from the self-hosted Windows runner"
+        required: true
+        default: "all"
+        type: choice
+        options:
+          - all
+          - yongin
+          - goyang
+          - suwon
+          - seongnam
+      force_goyang:
+        description: "Run Goyang crawl outside the KST 05:00~22:00 window"
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: tennis-crawl-local-fallback
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: [self-hosted, Windows, X64, tennis-local]
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install deps
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Refresh Korean gov SSL pins
+        shell: pwsh
+        continue-on-error: true
+        run: python fetch_korea_gov_certs.py
+
+      - name: Run local refresh from this runner IP
+        shell: pwsh
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          RUN_TARGET: ${{ inputs.target }}
+          FORCE_GOYANG_CRAWL: ${{ inputs.force_goyang }}
+          GYT_USE_CURL_CFFI: "1"
+          GYT_DEBUG_DUMP: "1"
+          GYT_PROXY_URL: ${{ secrets.GYT_PROXY_URL }}
+          GYS_ID: ${{ secrets.GYS_ID }}
+          GYS_PW: ${{ secrets.GYS_PW }}
+          ISDC_ID: ${{ secrets.ISDC_ID }}
+          ISDC_PW: ${{ secrets.ISDC_PW }}
+          VAPID_PUBLIC_KEY: ${{ secrets.VAPID_PUBLIC_KEY }}
+          VAPID_PRIVATE_KEY: ${{ secrets.VAPID_PRIVATE_KEY }}
+          VAPID_SUBJECT: ${{ secrets.VAPID_SUBJECT }}
+          CRAWL_TAILSCALE_EXIT_NODE: ""
+          GYT_TAILSCALE_EXIT_NODE: ""
+        run: |
+          .\scripts\run_local_refresh.ps1 -Target "${{ inputs.target }}"
+
+      - name: Upload local logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: local-refresh-logs
+          path: logs
+          if-no-files-found: ignore
+
+      - name: Upload gytennis debug artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gytennis-debug-local
+          path: debug/gytennis
+          if-no-files-found: ignore

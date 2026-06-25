@@ -1,0 +1,7 @@
+.env.local
+logs/
+debug/
+debug_latest_gytennis/
+korea_gov_ca.pem
+__pycache__/
+*.pyc
