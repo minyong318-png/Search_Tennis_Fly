@@ -33,7 +33,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install deps
-        shell: pwsh
+        shell: powershell
         run: |
           $python = "$env:LOCALAPPDATA\Programs\Python\Python311\python.exe"
           if (-not (Test-Path $python)) {
@@ -44,7 +44,7 @@ jobs:
           & $python -m pip install -r requirements.txt
 
       - name: Refresh Korean gov SSL pins
-        shell: pwsh
+        shell: powershell
         continue-on-error: true
         run: |
           $python = "$env:LOCALAPPDATA\Programs\Python\Python311\python.exe"
@@ -54,7 +54,7 @@ jobs:
           & $python fetch_korea_gov_certs.py
 
       - name: Run local refresh from this runner IP
-        shell: pwsh
+        shell: powershell
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           RUN_TARGET: ${{ inputs.target }}
