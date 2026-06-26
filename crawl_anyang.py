@@ -228,7 +228,7 @@ def crawl_anyang() -> Dict[str, Any]:
                         }
                         availability[raw_id] = {}
                     for slot in slots:
-                        slot["reserveUrl"] = f"{DAILY_URL}/{cv}/{ymd}"
+                        slot["reserveUrl"] = f"{DAILY_URL}/{cv}"
                     availability[raw_id].setdefault(yyyymmdd, []).extend(slots)
             except Exception as exc:
                 stats["fail"] += 1

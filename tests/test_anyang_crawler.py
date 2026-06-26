@@ -1,7 +1,7 @@
 import os
 import sys
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
@@ -77,6 +77,34 @@ class AnyangCrawlerTests(unittest.TestCase):
             availability["anyang:aytennis-1"]["20260629"],
             [{"timeContent": "07:00 ~ 08:00"}],
         )
+
+    def test_crawl_anyang_slots_link_to_facility_page_not_date_page(self):
+        import crawl_anyang
+
+        response = Mock()
+        response.encoding = "utf-8"
+        response.text = "<html></html>"
+        response.raise_for_status.return_value = None
+        session = Mock()
+        session.get.return_value = response
+
+        with patch.object(crawl_anyang, "_session", return_value=session), patch.object(
+            crawl_anyang, "_warmup"
+        ), patch.object(crawl_anyang, "_extract_calendar_dates", return_value=["2026-06-29"]), patch.object(
+            crawl_anyang, "_court_numbers_from_html", return_value=["1"]
+        ), patch.object(
+            crawl_anyang,
+            "_fetch_day",
+            return_value=(
+                1,
+                "20260629",
+                {"1": [{"timeContent": "07:00 ~ 08:00", "slotKey": "07:00~08:00", "courtNo": "1"}]},
+            ),
+        ):
+            out = crawl_anyang.crawl_anyang()
+
+        slot = out["availability"]["aytennis-1-1"]["20260629"][0]
+        self.assertEqual(slot["reserveUrl"], "https://www.aytennis.or.kr/daily/1")
 
 
 if __name__ == "__main__":
