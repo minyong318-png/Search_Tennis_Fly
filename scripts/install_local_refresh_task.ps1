@@ -1,6 +1,6 @@
 param(
   [string]$TaskName = "TennisLocalRefreshFallback",
-  [ValidateSet("all", "yongin", "goyang", "suwon", "seongnam")]
+  [ValidateSet("all", "yongin", "goyang", "suwon", "seongnam", "anyang")]
   [string]$Target = "all",
   [int]$IntervalMinutes = 30,
   [string]$Python = "python"

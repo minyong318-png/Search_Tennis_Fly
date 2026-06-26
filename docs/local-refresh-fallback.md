@@ -36,7 +36,7 @@ Run it from GitHub:
 Actions > Crawl Local Fallback & Notify > Run workflow
 ```
 
-Choose `all`, `yongin`, `goyang`, `suwon`, or `seongnam`.
+Choose `all`, `yongin`, `goyang`, `suwon`, `seongnam`, or `anyang`.
 
 ## Setup
 
