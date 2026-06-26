@@ -15,6 +15,7 @@ import crawl_goyang
 import crawl_suwon
 import crawl_seongnam
 import crawl_anyang
+import crawl_paju
 
 
 # =========================================================
@@ -88,6 +89,10 @@ def get_court_group(title: str, facility_id: str = "") -> str:
     if str(facility_id).startswith("anyang:"):
         base = re.sub(r"\s*\d+\s*코트\s*$", "", base).strip()
         return f"안양|{base}"
+    if str(facility_id).startswith("paju:"):
+        base = re.sub(r"\s*\d+\s*肄뷀듃\s*$", "", base).strip()
+        base = re.sub(r"\s*\d+\s*코트\s*$", "", base).strip()
+        return f"파주|{base}"
     return base
 
 def slot_time_range_minutes(time_content: Any) -> Optional[Tuple[int, int]]:
@@ -276,6 +281,9 @@ def _ns_seongnam_id(key: str) -> str:
 def _ns_anyang_id(key: str) -> str:
     return f"anyang:{key}"
 
+def _ns_paju_id(key: str) -> str:
+    return f"paju:{key}"
+
 def _strip_yongin_resve_id(fid: str) -> str:
     # yongin:123 -> 123 (프론트 예약 링크용)
     if isinstance(fid, str) and fid.startswith("yongin:"):
@@ -352,7 +360,7 @@ def crawl_all() -> Tuple[Dict[str, Any], Dict[str, Dict[str, List[Any]]]]:
       - daehwa  : goyang:daehwa:{courtNo}
 
     ✅ RUN_TARGET
-      - yongin / goyang / suwon / seongnam / anyang / all
+      - yongin / goyang / suwon / seongnam / anyang / paju / all
     """
     target = (os.getenv("RUN_TARGET") or "all").strip().lower()
 
@@ -626,6 +634,20 @@ def crawl_all() -> Tuple[Dict[str, Any], Dict[str, Dict[str, List[Any]]]]:
         for raw_fid, daymap in (out_ay.get("availability") or {}).items():
             availability[_ns_anyang_id(str(raw_fid))] = daymap or {}
 
+    # -----------------------------
+    # (F) Paju
+    # -----------------------------
+    if target in ("all", "paju"):
+        set_crawl_exit_node("PAJU", True)
+        try:
+            out_pj = crawl_paju.crawl_paju()
+        finally:
+            set_crawl_exit_node("PAJU", False)
+        for raw_fid, meta in (out_pj.get("facilities") or {}).items():
+            facilities[_ns_paju_id(str(raw_fid))] = meta
+        for raw_fid, daymap in (out_pj.get("availability") or {}).items():
+            availability[_ns_paju_id(str(raw_fid))] = daymap or {}
+
     return facilities, availability
 # =========================================================
 # DB write: facilities / availability_cache (프론트용)
@@ -721,7 +743,7 @@ def clear_availability_cache_for_target(
     """
     타겟별로 해당 기간의 availability_cache를 빈 배열로 초기화한다.
     - DELETE가 아니라 slots_json='[]'로 초기화 (충돌/외래키 안전)
-    - target: yongin | goyang | suwon | seongnam | anyang | all
+    - target: yongin | goyang | suwon | seongnam | anyang | paju | all
     """
     target = (target or "all").strip().lower()
 
@@ -736,6 +758,8 @@ def clear_availability_cache_for_target(
         prefixes.append("seongnam:%")
     if target in ("all", "anyang"):
         prefixes.append("anyang:%")
+    if target in ("all", "paju"):
+        prefixes.append("paju:%")
 
     excluded = tuple(str(prefix) for prefix in exclude_prefixes if prefix)
     prefixes = [prefix for prefix in prefixes if not any(prefix.startswith(skip) for skip in excluded)]
@@ -1098,6 +1122,13 @@ def main() -> None:
         reason = "partial_failure" if anyang_partial_failure else "slots=0"
         print(f"[ANYANG][SAFEGUARD] {reason}; keep existing anyang cache")
 
+    paju_slots = count_slots_for_prefix(availability, "paju:")
+    paju_partial_failure = bool(getattr(crawl_paju, "LAST_PARTIAL_FAILURE", False))
+    protect_paju_cache = target in ("all", "paju") and (paju_slots == 0 or paju_partial_failure)
+    if protect_paju_cache:
+        reason = "partial_failure" if paju_partial_failure else "slots=0"
+        print(f"[PAJU][SAFEGUARD] {reason}; keep existing paju cache")
+
     yongin_failed_dates = int(getattr(tennis_core, "CRAWL_STATS", {}).get("time_failed", 0) or 0)
     yongin_slots = count_slots_for_prefix(availability, "yongin:")
     protect_yongin_cache = target in ("all", "yongin") and (yongin_failed_dates > 0 or yongin_slots == 0)
@@ -1117,6 +1148,9 @@ def main() -> None:
     if protect_anyang_cache:
         facilities_for_write = {k: v for k, v in facilities_for_write.items() if not str(k).startswith("anyang:")}
         availability_for_write = {k: v for k, v in availability_for_write.items() if not str(k).startswith("anyang:")}
+    if protect_paju_cache:
+        facilities_for_write = {k: v for k, v in facilities_for_write.items() if not str(k).startswith("paju:")}
+        availability_for_write = {k: v for k, v in availability_for_write.items() if not str(k).startswith("paju:")}
 
     excluded_cache_prefixes = []
     if protect_yongin_cache:
@@ -1129,6 +1163,8 @@ def main() -> None:
         excluded_cache_prefixes.append("seongnam:")
     if protect_anyang_cache:
         excluded_cache_prefixes.append("anyang:")
+    if protect_paju_cache:
+        excluded_cache_prefixes.append("paju:")
 
     with psycopg.connect(database_url) as conn:
         # Frontend tables and alarm housekeeping are DB work, so run them after crawling.

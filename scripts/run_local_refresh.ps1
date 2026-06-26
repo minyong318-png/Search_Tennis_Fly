@@ -1,5 +1,5 @@
 param(
-  [ValidateSet("all", "yongin", "goyang", "suwon", "seongnam", "anyang")]
+  [ValidateSet("all", "yongin", "goyang", "suwon", "seongnam", "anyang", "paju")]
   [string]$Target = "",
   [string]$EnvFile = "",
   [string]$Python = "python",
