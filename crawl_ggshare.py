@@ -2,7 +2,6 @@ import re
 import json
 import os
 import subprocess
-import sys
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Any, Dict, List
@@ -130,7 +129,7 @@ def crawl_ggshare(target_city: str = "") -> Dict[str, Any]:
     try:
         return _crawl_browser(selected_city)
     except Exception as exc:
-        print(f"[GGSHARE_BROWSER][WARN] fallback to metadata-only crawl: {exc}", file=sys.stderr)
+        print(f"[GGSHARE_BROWSER][WARN] fallback to metadata-only crawl: {exc}")
 
     items = [item for item in FACILITIES if not selected_city or item["city"] == selected_city]
 

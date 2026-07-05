@@ -42,21 +42,27 @@ async function login(page) {
   if (!USER_ID || !USER_PW) {
     throw new Error("GGSHARE_ID/GGSHARE_PW env is required for slot crawl");
   }
-  await page.goto(`${BASE_URL}/member`, { waitUntil: "domcontentloaded", timeout: 90000 });
+  await page.goto(BASE_URL, { waitUntil: "domcontentloaded", timeout: 90000 });
+  await waitForMain(page);
   for (let attempt = 0; attempt < 3; attempt += 1) {
-    if (await page.locator("#mberIdChk").isVisible().catch(() => false)) break;
+    if (await page.locator("#mberIdChk").count().catch(() => 0)) break;
+    await page.evaluate(() => {
+      const links = [...document.querySelectorAll("a[href$='/member'], a[href='/member'], a[href*='/member']")]
+        .filter((a) => /로그인/.test((a.innerText || "").trim()));
+      const visible = links.find((a) => {
+        const rect = a.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+      });
+      (visible || links[0])?.click();
+    }).catch(() => null);
+    await page.waitForTimeout(5000);
+    if (await page.locator("#mberIdChk").count().catch(() => 0)) break;
+    await page.goto(`${BASE_URL}/member`, { waitUntil: "domcontentloaded", timeout: 90000 }).catch(() => null);
     await waitForMain(page);
-    if (await page.locator("#mberIdChk").isVisible().catch(() => false)) break;
-    const loginLinks = page.locator("a", { hasText: "로그인" });
-    const count = await loginLinks.count().catch(() => 0);
-    if (count > 0) {
-      await loginLinks.nth(count - 1).click({ timeout: 10000 }).catch(() => null);
-      await page.waitForTimeout(3000);
-    }
   }
-  await page.waitForSelector("#mberIdChk", { timeout: 90000 });
-  await page.fill("#mberIdChk", USER_ID);
-  await page.fill("#passwordChk", USER_PW);
+  await page.waitForSelector("#mberIdChk", { state: "attached", timeout: 90000 });
+  await page.locator("#mberIdChk").fill(USER_ID, { force: true });
+  await page.locator("#passwordChk").fill(USER_PW, { force: true });
   await page.press("#passwordChk", "Enter").catch(() => null);
   await page.waitForTimeout(1500);
   if (/로그아웃|마이페이지/.test(await page.locator("body").innerText().catch(() => ""))) return;
