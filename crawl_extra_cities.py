@@ -324,7 +324,7 @@ def crawl_uiwang() -> Dict[str, Any]:
         f"uuc-{place_cd}": {
             "title": title,
             "location": "의왕시",
-            "reserveUrl": f"{UIWANG_BASE}/fmcs/4?facilities_type=L&base_date={date.today().strftime('%Y%m%d')}&center=UUC02&part=15&place={place_cd}",
+            "reserveUrl": f"{UIWANG_BASE}/fmcs/4?facilities_type=L&base_date={date.today().strftime('%Y%m%d')}&rent_type=1001&center=UUC02&part=15&place={place_cd}",
         }
         for place_cd, title, _court_no in places
     }
@@ -360,7 +360,7 @@ def crawl_uiwang() -> Dict[str, Any]:
                     timeout=_timeout(),
                     headers={
                         "X-Requested-With": "XMLHttpRequest",
-                        "Referer": f"{UIWANG_BASE}/fmcs/4?facilities_type=L&center=UUC02&part=15&place={place_cd}",
+                        "Referer": f"{UIWANG_BASE}/fmcs/4?facilities_type=L&rent_type=1001&center=UUC02&part=15&place={place_cd}",
                     },
                 )
                 response.raise_for_status()
@@ -383,7 +383,7 @@ def crawl_uiwang() -> Dict[str, Any]:
                         continue
                     time_value = quote(f"{time_no};{time_nm};{start.replace(':', '')};{end.replace(':', '')};1")
                     reserve_url = (
-                        f"{UIWANG_BASE}/fmcs/4?facilities_type=L&center=UUC02&part=15&base_date={ymd}"
+                        f"{UIWANG_BASE}/fmcs/4?facilities_type=L&rent_type=1001&center=UUC02&part=15&base_date={ymd}"
                         f"&action=write&place={place_cd}&comcd=UUC02&part_cd=15&place_cd={place_cd}"
                         f"&time_no={time_value}&rent_date={ymd}"
                     )

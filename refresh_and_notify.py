@@ -378,7 +378,8 @@ def crawl_all() -> Tuple[Dict[str, Any], Dict[str, Dict[str, List[Any]]]]:
       - daehwa  : goyang:daehwa:{courtNo}
 
     ✅ RUN_TARGET
-      - yongin / goyang / suwon / seongnam / anyang / paju / hanam / uiwang / incheon / all
+      - yongin / goyang / suwon / seongnam / anyang / paju / hanam / uiwang / incheon
+      - anseong / uijeongbu / yangpyeong / ggshare / all
     """
     target = (os.getenv("RUN_TARGET") or "all").strip().lower()
 
@@ -669,8 +670,9 @@ def crawl_all() -> Tuple[Dict[str, Any], Dict[str, Dict[str, List[Any]]]]:
     # -----------------------------
     # (G) 경기공유 공개 시설 후보
     # -----------------------------
-    if target in ("all", "ggshare"):
-        out_gg = crawl_ggshare.crawl_ggshare()
+    ggshare_targets = ("anseong", "uijeongbu", "yangpyeong")
+    if target in ("all", "ggshare", *ggshare_targets):
+        out_gg = crawl_ggshare.crawl_ggshare("" if target in ("all", "ggshare") else target)
         for raw_fid, meta in (out_gg.get("facilities") or {}).items():
             facilities[_ns_ggshare_id(str(raw_fid))] = meta
         for raw_fid, daymap in (out_gg.get("availability") or {}).items():
@@ -841,7 +843,7 @@ def clear_availability_cache_for_target(
         prefixes.append("anyang:%")
     if target in ("all", "paju"):
         prefixes.append("paju:%")
-    if target in ("all", "ggshare"):
+    if target in ("all", "ggshare", "anseong", "uijeongbu", "yangpyeong"):
         prefixes.append("ggshare:%")
     if target in ("all", "hanam"):
         prefixes.append("hanam:%")

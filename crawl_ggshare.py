@@ -22,7 +22,7 @@ FACILITIES = [
         "label": "안성",
         "facility_id": "F0142",
         "insti_code": "1230001",
-        "title": "농협물류단지공원 테니스장",
+        "title": "팜랜드 물류단지공원 테니스장",
     },
     {
         "city": "uijeongbu",
@@ -77,10 +77,8 @@ def _strip_html(html: str) -> str:
 
 
 def _extract_address(text: str) -> str:
-    match = re.search(r"(경기\s+[^\s]+시[^\n]*?|경기\s+[^\s]+군[^\n]*?)(?:예약문의|예약 안내|찾아오시는 길|$)", text)
-    if not match:
-        return ""
-    return match.group(1).strip()[:120]
+    match = re.search(r"(경기\s+[^\s]+(?:시|군)\s+[^\n]*?)(?:예약문의|예약 안내|찾아오시는 길|$)", text)
+    return match.group(1).strip()[:120] if match else ""
 
 
 def _empty_daymap(days_ahead: int = 45) -> Dict[str, List[dict]]:
@@ -88,16 +86,18 @@ def _empty_daymap(days_ahead: int = 45) -> Dict[str, List[dict]]:
     return {(start + timedelta(days=offset)).strftime("%Y%m%d"): [] for offset in range(days_ahead + 1)}
 
 
-def crawl_ggshare() -> Dict[str, Any]:
+def crawl_ggshare(target_city: str = "") -> Dict[str, Any]:
+    selected_city = (target_city or "").strip().lower()
+    items = [item for item in FACILITIES if not selected_city or item["city"] == selected_city]
+
     session = _session()
     facilities: Dict[str, dict] = {}
     availability: Dict[str, Dict[str, List[dict]]] = {}
-    stats = {"total": len(FACILITIES), "ok": 0, "fail": 0}
+    stats = {"total": len(items), "ok": 0, "fail": 0}
 
-    for item in FACILITIES:
+    for item in items:
         raw_id = f"{item['city']}-{item['facility_id']}-{item['insti_code']}"
         url = _view_url(item)
-        title = item["title"]
         location = f"{item['label']}시" if item["city"] != "yangpyeong" else "양평군"
         try:
             response = session.get(url, timeout=10)
@@ -111,15 +111,16 @@ def crawl_ggshare() -> Dict[str, Any]:
             print(f"[GGSHARE][WARN] {raw_id} error={exc}")
 
         facilities[raw_id] = {
-            "title": title,
+            "title": item["title"],
             "location": address or location,
             "reserveUrl": url,
             "source": "경기공유서비스",
-            "blockedReason": "경기공유 예약 진입 단계는 CAPTCHA가 있어 잔여 시간 자동 조회는 보류",
+            "blockedReason": "경기공유 예약 진입 단계 확인이 필요해 현재 잔여 슬롯 자동 조회는 보류",
         }
         availability[raw_id] = _empty_daymap()
 
-    print(f"[GGSHARE][STATS] total={stats['total']} ok={stats['ok']} fail={stats['fail']}")
+    label = selected_city or "all"
+    print(f"[GGSHARE][STATS] target={label} total={stats['total']} ok={stats['ok']} fail={stats['fail']}")
     return {"facilities": facilities, "availability": availability}
 
 
