@@ -16,6 +16,8 @@ import crawl_suwon
 import crawl_seongnam
 import crawl_anyang
 import crawl_paju
+import crawl_ggshare
+import crawl_extra_cities
 
 
 # =========================================================
@@ -284,6 +286,22 @@ def _ns_anyang_id(key: str) -> str:
 def _ns_paju_id(key: str) -> str:
     return f"paju:{key}"
 
+
+def _ns_ggshare_id(key: str) -> str:
+    return f"ggshare:{key}"
+
+
+def _ns_hanam_id(key: str) -> str:
+    return f"hanam:{key}"
+
+
+def _ns_uiwang_id(key: str) -> str:
+    return f"uiwang:{key}"
+
+
+def _ns_incheon_id(key: str) -> str:
+    return f"incheon:{key}"
+
 def _strip_yongin_resve_id(fid: str) -> str:
     # yongin:123 -> 123 (프론트 예약 링크용)
     if isinstance(fid, str) and fid.startswith("yongin:"):
@@ -360,7 +378,7 @@ def crawl_all() -> Tuple[Dict[str, Any], Dict[str, Dict[str, List[Any]]]]:
       - daehwa  : goyang:daehwa:{courtNo}
 
     ✅ RUN_TARGET
-      - yongin / goyang / suwon / seongnam / anyang / paju / all
+      - yongin / goyang / suwon / seongnam / anyang / paju / hanam / uiwang / incheon / all
     """
     target = (os.getenv("RUN_TARGET") or "all").strip().lower()
 
@@ -648,6 +666,40 @@ def crawl_all() -> Tuple[Dict[str, Any], Dict[str, Dict[str, List[Any]]]]:
         for raw_fid, daymap in (out_pj.get("availability") or {}).items():
             availability[_ns_paju_id(str(raw_fid))] = daymap or {}
 
+    # -----------------------------
+    # (G) 경기공유 공개 시설 후보
+    # -----------------------------
+    if target in ("all", "ggshare"):
+        out_gg = crawl_ggshare.crawl_ggshare()
+        for raw_fid, meta in (out_gg.get("facilities") or {}).items():
+            facilities[_ns_ggshare_id(str(raw_fid))] = meta
+        for raw_fid, daymap in (out_gg.get("availability") or {}).items():
+            availability[_ns_ggshare_id(str(raw_fid))] = daymap or {}
+
+    # -----------------------------
+    # (H) Extra city sources
+    # -----------------------------
+    if target in ("all", "hanam"):
+        out_hn = crawl_extra_cities.crawl_hanam()
+        for raw_fid, meta in (out_hn.get("facilities") or {}).items():
+            facilities[_ns_hanam_id(str(raw_fid))] = meta
+        for raw_fid, daymap in (out_hn.get("availability") or {}).items():
+            availability[_ns_hanam_id(str(raw_fid))] = daymap or {}
+
+    if target in ("all", "uiwang"):
+        out_uw = crawl_extra_cities.crawl_uiwang()
+        for raw_fid, meta in (out_uw.get("facilities") or {}).items():
+            facilities[_ns_uiwang_id(str(raw_fid))] = meta
+        for raw_fid, daymap in (out_uw.get("availability") or {}).items():
+            availability[_ns_uiwang_id(str(raw_fid))] = daymap or {}
+
+    if target in ("all", "incheon"):
+        out_ic = crawl_extra_cities.crawl_incheon()
+        for raw_fid, meta in (out_ic.get("facilities") or {}).items():
+            facilities[_ns_incheon_id(str(raw_fid))] = meta
+        for raw_fid, daymap in (out_ic.get("availability") or {}).items():
+            availability[_ns_incheon_id(str(raw_fid))] = daymap or {}
+
     return facilities, availability
 # =========================================================
 # DB write: facilities / availability_cache (프론트용)
@@ -760,6 +812,14 @@ def clear_availability_cache_for_target(
         prefixes.append("anyang:%")
     if target in ("all", "paju"):
         prefixes.append("paju:%")
+    if target in ("all", "ggshare"):
+        prefixes.append("ggshare:%")
+    if target in ("all", "hanam"):
+        prefixes.append("hanam:%")
+    if target in ("all", "uiwang"):
+        prefixes.append("uiwang:%")
+    if target in ("all", "incheon"):
+        prefixes.append("incheon:%")
 
     excluded = tuple(str(prefix) for prefix in exclude_prefixes if prefix)
     prefixes = [prefix for prefix in prefixes if not any(prefix.startswith(skip) for skip in excluded)]
@@ -1151,7 +1211,6 @@ def main() -> None:
     if protect_paju_cache:
         facilities_for_write = {k: v for k, v in facilities_for_write.items() if not str(k).startswith("paju:")}
         availability_for_write = {k: v for k, v in availability_for_write.items() if not str(k).startswith("paju:")}
-
     excluded_cache_prefixes = []
     if protect_yongin_cache:
         excluded_cache_prefixes.append("yongin:")
@@ -1165,7 +1224,6 @@ def main() -> None:
         excluded_cache_prefixes.append("anyang:")
     if protect_paju_cache:
         excluded_cache_prefixes.append("paju:")
-
     with psycopg.connect(database_url) as conn:
         # Frontend tables and alarm housekeeping are DB work, so run them after crawling.
         ensure_extra_schema(conn)
