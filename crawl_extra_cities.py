@@ -1,4 +1,5 @@
 import html
+import json
 import os
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -13,6 +14,7 @@ from urllib3.util.retry import Retry
 
 
 HANAM_BASE = "https://www.hanam.go.kr"
+HANAM_SPORTS_BASE = "https://rent.hanamsport.or.kr/hanam_rent_ms"
 UIWANG_BASE = "https://reserve.uuc.or.kr"
 JMPSS_BASE = "https://www.jmpss.or.kr"
 YSFSMC_BASE = "https://www.ysfsmc.or.kr"
@@ -169,6 +171,71 @@ def _fetch_hanam_day(court_code: str, court_no: str, day: date) -> tuple[str, Di
     return court_code, _parse_hanam_day(_text(response), url, court_no)
 
 
+def _parse_hanam_sports_payload(payload: dict, ymd: str, reserve_url: str) -> Dict[str, Dict[str, List[dict]]]:
+    out: Dict[str, Dict[str, List[dict]]] = {}
+    try:
+        courts = json.loads(payload.get("play_name") or "[]")
+    except (TypeError, ValueError):
+        courts = []
+    for item in courts if isinstance(courts, list) else []:
+        place_code = str(item.get("place_code") or "").strip()
+        play_code = str(item.get("play_code") or "").strip()
+        event_code = str(item.get("event_code") or "").strip()
+        raw_court = str(item.get("play_name") or "").strip()
+        court_no = re.sub(r"\D+", "", raw_court) or raw_court or play_code
+        fid = f"sports-center-{place_code}-{play_code}"
+        soup = BeautifulSoup(str(item.get("htmlx") or ""), "lxml")
+        for block in soup.select("div.chk_d"):
+            checkbox = block.select_one('input[name="ct_chk[]"]')
+            if not checkbox or checkbox.has_attr("disabled"):
+                continue
+            time_node = block.select_one(".chk_t")
+            match = re.search(r"(\d{1,2}:\d{2})\s*[~\-]\s*(\d{1,2}:\d{2})", time_node.get_text(" ", strip=True) if time_node else "")
+            if not match:
+                continue
+            start, end = match.group(1), match.group(2)
+            slot = {
+                "timeContent": f"{start} ~ {end}",
+                "slotKey": f"{start}~{end}",
+                "courtNo": court_no,
+                "reserveUrl": reserve_url,
+            }
+            if place_code and event_code and play_code:
+                slot["courtKey"] = f"{place_code}{event_code}{play_code}"
+            out.setdefault(fid, {}).setdefault(ymd, []).append(slot)
+    for daymap in out.values():
+        _sort_daymap(daymap)
+    return out
+
+
+def _fetch_hanam_sports_day(place_code: str, day: date) -> tuple[str, Dict[str, Dict[str, List[dict]]]]:
+    session = _session()
+    ymd = day.strftime("%Y%m%d")
+    reserve_url = f"{HANAM_SPORTS_BASE}/?place_code={place_code}"
+    session.get(reserve_url, timeout=_timeout()).raise_for_status()
+    response = session.post(
+        f"{HANAM_SPORTS_BASE}/center/ajax.day.rent.list.php",
+        data={
+            "center_id": "01",
+            "rdate": ymd,
+            "rent_open_start_day": "10",
+            "place_code": place_code,
+            "Rstep": "",
+        },
+        timeout=_timeout(),
+        headers={
+            "Accept": "application/json, text/javascript, */*; q=0.01",
+            "Referer": reserve_url,
+            "X-Requested-With": "XMLHttpRequest",
+        },
+    )
+    response.raise_for_status()
+    payload = response.json()
+    if str(payload.get("rstate") or "") == "9":
+        raise RuntimeError(str(payload.get("error") or "invalid access"))
+    return place_code, _parse_hanam_sports_payload(payload, ymd, reserve_url)
+
+
 def crawl_hanam() -> Dict[str, Any]:
     courts = {"TS01": "1", "TS02": "2", "TS03": "3", "TS04": "4"}
     facilities = {
@@ -185,6 +252,19 @@ def crawl_hanam() -> Dict[str, Any]:
         "reserveUrl": "https://rent.hanamsport.or.kr/hanam_rent_ms/",
         "blockedReason": "온라인대관서비스 화면 구조 분석 후 슬롯 파싱 예정",
     }
+    facilities.pop("hanam-sports-center", None)
+    sports_places = {
+        "024": "\ud558\ub0a8\uad6d\ubbfc\uccb4\uc721\uc13c\ud130 \uc81c1\ud14c\ub2c8\uc2a4\uc7a5",
+        "025": "\ud558\ub0a8\uad6d\ubbfc\uccb4\uc721\uc13c\ud130 \uc81c2\ud14c\ub2c8\uc2a4\uc7a5",
+    }
+    for place_code, title in sports_places.items():
+        for idx in range(1, 9):
+            play_code = f"{idx:02d}"
+            facilities[f"sports-center-{place_code}-{play_code}"] = {
+                "title": f"{title} {idx}\uba74",
+                "location": "\ud558\ub0a8\uc2dc",
+                "reserveUrl": f"{HANAM_SPORTS_BASE}/?place_code={place_code}",
+            }
     availability = {fid: _empty_daymap() for fid in facilities}
     tasks = [(code, court_no, day) for code, court_no in courts.items() for day in _date_values()]
     stats = {"ok": 0, "fail": 0}
@@ -199,10 +279,29 @@ def crawl_hanam() -> Dict[str, Any]:
             except Exception as exc:
                 stats["fail"] += 1
                 print(f"[HANAM][WARN] code={code} date={day:%Y%m%d} error={exc}")
+    sports_tasks = [(place_code, day) for place_code in sports_places for day in _date_values()]
+    sports_stats = {"ok": 0, "fail": 0}
+    with ThreadPoolExecutor(max_workers=6) as executor:
+        futures = {executor.submit(_fetch_hanam_sports_day, place_code, day): (place_code, day) for place_code, day in sports_tasks}
+        for future in as_completed(futures):
+            place_code, day = futures[future]
+            try:
+                _place_code, facility_daymaps = future.result()
+                for fid, daymap in facility_daymaps.items():
+                    if fid in availability:
+                        _merge_daymap(availability[fid], daymap)
+                sports_stats["ok"] += 1
+            except Exception as exc:
+                sports_stats["fail"] += 1
+                print(f"[HANAM][WARN] sports_place={place_code} date={day:%Y%m%d} error={exc}")
     for daymap in availability.values():
         _sort_daymap(daymap)
     slot_count = sum(len(slots) for daymap in availability.values() for slots in daymap.values())
-    print(f"[HANAM][STATS] facilities={len(facilities)} slots={slot_count} ok={stats['ok']} fail={stats['fail']} pending_parser=1")
+    print(
+        f"[HANAM][STATS] facilities={len(facilities)} slots={slot_count} "
+        f"misa_ok={stats['ok']} misa_fail={stats['fail']} "
+        f"sports_ok={sports_stats['ok']} sports_fail={sports_stats['fail']}"
+    )
     return {"facilities": facilities, "availability": availability}
 
 
