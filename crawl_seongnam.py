@@ -85,10 +85,35 @@ def _parse_timetable(html: str) -> list[dict]:
         cells = row.select("td")
         if not radio or len(cells) < 3:
             continue
+        if radio.has_attr("disabled") or not (radio.get("value") or "").strip():
+            continue
+        status_text = cells[3].get_text(" ", strip=True) if len(cells) > 3 else ""
+        if status_text:
+            continue
         time_content = cells[2].get_text(" ", strip=True)
         if time_content:
             slots.append({"timeContent": time_content, "reserveUrl": LIST_URL})
     return slots
+
+
+def _use_date_status_precheck() -> bool:
+    raw = (os.getenv("SEONGNAM_DATE_STATUS_PRECHECK") or "1").strip().lower()
+    return raw not in ("0", "false", "no", "off")
+
+
+def _reservation_status(session: requests.Session, fac_id: str, request_date: str) -> str:
+    response = _request(
+        session,
+        "GET",
+        "getReservationInfoByDate.do",
+        params={"facId": fac_id, "resdate": request_date},
+        timeout=_request_timeout(),
+    )
+    return response.text.strip().lower()
+
+
+def _is_skippable_date_status(status: str) -> bool:
+    return status in {"closed", "empty", "full"}
 
 
 def _days_ahead() -> int:
@@ -107,22 +132,36 @@ def _max_workers() -> int:
         return 16
 
 
+def _require_login() -> bool:
+    raw = (os.getenv("SEONGNAM_REQUIRE_LOGIN") or "0").strip().lower()
+    return raw in ("1", "true", "yes", "on")
+
+
 def _thread_session() -> requests.Session:
     session = getattr(_thread_local, "session", None)
     if session is None:
         session = _session()
-        _login(session)
+        user_id = (os.getenv("ISDC_ID") or "").strip()
+        password = os.getenv("ISDC_PW") or ""
+        if (user_id or password) and not _login(session) and _require_login():
+            raise RuntimeError("seongnam thread login failed")
         _thread_local.session = session
     return session
 
 
 def _crawl_court(session: requests.Session, fac_id: str, days_ahead: int) -> Dict[str, list]:
     daymap: Dict[str, list] = {}
+    use_precheck = _use_date_status_precheck()
     for offset in range(days_ahead + 1):
         current = date.today() + timedelta(days=offset)
         request_date = f"{current.year}-{current.month}-{current.day}"
         yyyymmdd = current.strftime("%Y%m%d")
         try:
+            if use_precheck:
+                status = _reservation_status(session, fac_id, request_date)
+                if _is_skippable_date_status(status):
+                    daymap[yyyymmdd] = []
+                    continue
             timetable = _request(
                 session,
                 "POST",
@@ -147,7 +186,8 @@ def crawl_seongnam() -> Dict[str, Any]:
     facilities: Dict[str, dict] = {}
     availability: Dict[str, Dict[str, list]] = {}
     total = ok = empty = fail = 0
-    login_required = not _login(session)
+    login_ok = _login(session)
+    login_required = _require_login() and not login_ok
 
     try:
         response = session.get(LIST_URL, timeout=_request_timeout())
@@ -186,7 +226,7 @@ def crawl_seongnam() -> Dict[str, Any]:
                     "title": title,
                     "location": "성남시",
                     "reserveUrl": LIST_URL,
-                    "availabilityStatus": "login_required" if login_required else "authenticated",
+                    "availabilityStatus": "authenticated" if login_ok else "public_timetable",
                 }
                 availability[fac_id] = {}
         except Exception as exc:
@@ -198,6 +238,7 @@ def crawl_seongnam() -> Dict[str, Any]:
         max_workers = min(_max_workers(), max(1, len(facilities)))
         print(f"[SEONGNAM][DAYS] days_ahead={days_ahead} dates_per_court={days_ahead + 1}")
         print(f"[SEONGNAM][REQUESTS] courts={len(facilities)} dates={days_ahead + 1} workers={max_workers}")
+        print(f"[SEONGNAM][PRECHECK] date_status={int(_use_date_status_precheck())}")
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = {
                 executor.submit(_crawl_court_threaded, fac_id, days_ahead): fac_id
@@ -226,6 +267,8 @@ def crawl_seongnam() -> Dict[str, Any]:
     print(f"[SEONGNAM][ELAPSED] seconds={time.perf_counter() - started_at:.2f}")
     if login_required:
         print("[SEONGNAM][INFO] public court list collected; availability requires login")
+    elif not login_ok:
+        print("[SEONGNAM][INFO] login failed; continued with public timetable endpoints")
     return {
         "facilities": facilities,
         "availability": availability,
