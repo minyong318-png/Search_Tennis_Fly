@@ -1,9 +1,10 @@
 import html
 import os
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, timedelta
 from typing import Any, Dict, Iterable, List
-from urllib.parse import urljoin
+from urllib.parse import quote, urljoin
 
 import requests
 from bs4 import BeautifulSoup
@@ -11,6 +12,8 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 
+HANAM_BASE = "https://www.hanam.go.kr"
+UIWANG_BASE = "https://reserve.uuc.or.kr"
 JMPSS_BASE = "https://www.jmpss.or.kr"
 YSFSMC_BASE = "https://www.ysfsmc.or.kr"
 
@@ -63,6 +66,11 @@ def _empty_daymap(days_ahead: int = 45) -> Dict[str, List[dict]]:
     return {(start + timedelta(days=offset)).strftime("%Y%m%d"): [] for offset in range(days_ahead + 1)}
 
 
+def _date_values(days_ahead: int = 45) -> List[date]:
+    start = date.today()
+    return [start + timedelta(days=offset) for offset in range(days_ahead + 1)]
+
+
 def _month_values(months_ahead: int = 1) -> List[str]:
     months: List[str] = []
     current = date.today().replace(day=1)
@@ -72,7 +80,21 @@ def _month_values(months_ahead: int = 1) -> List[str]:
     return months
 
 
-def _slot_from_title(title: str, reserve_url: str, court_no: str = "") -> dict | None:
+def _yyyymm_values(months_ahead: int = 1) -> List[str]:
+    return [month.replace("-", "") for month in _month_values(months_ahead)]
+
+
+def _merge_daymap(dst: Dict[str, List[dict]], src: Dict[str, List[dict]]) -> None:
+    for ymd, slots in src.items():
+        dst.setdefault(ymd, []).extend(slots)
+
+
+def _sort_daymap(daymap: Dict[str, List[dict]]) -> None:
+    for slots in daymap.values():
+        slots.sort(key=lambda slot: slot.get("slotKey") or "")
+
+
+def _slot_from_title(title: str, reserve_url: str, court_no: str = "") -> tuple[str, dict] | None:
     match = TITLE_RE.search(html.unescape(title or ""))
     if not match:
         return None
@@ -91,11 +113,6 @@ def _slot_from_title(title: str, reserve_url: str, court_no: str = "") -> dict |
     return f"{year:04d}{month:02d}{day:02d}", slot
 
 
-def _merge_daymap(dst: Dict[str, List[dict]], src: Dict[str, List[dict]]) -> None:
-    for ymd, slots in src.items():
-        dst.setdefault(ymd, []).extend(slots)
-
-
 def _parse_reserve_links(html_text: str, base_url: str, court_no: str = "") -> Dict[str, List[dict]]:
     soup = BeautifulSoup(html_text, "lxml")
     out: Dict[str, List[dict]] = {}
@@ -107,54 +124,186 @@ def _parse_reserve_links(html_text: str, base_url: str, court_no: str = "") -> D
             continue
         ymd, slot = parsed
         out.setdefault(ymd, []).append(slot)
-    for slots in out.values():
-        slots.sort(key=lambda slot: slot.get("slotKey") or "")
+    _sort_daymap(out)
     return out
 
 
+def _parse_hanam_day(html_text: str, reserve_url: str, court_no: str) -> Dict[str, List[dict]]:
+    soup = BeautifulSoup(html_text, "lxml")
+    out: Dict[str, List[dict]] = {}
+    for row in soup.select("#dynamicTbody tr"):
+        cells = row.select("td")
+        if len(cells) < 3:
+            continue
+        if "예약하기" not in cells[2].get_text(" ", strip=True):
+            continue
+        ymd = re.sub(r"\D", "", cells[0].get_text(" ", strip=True))
+        time_text = " ".join(cells[1].get_text(" ", strip=True).split())
+        match = re.search(r"(\d{1,2}:\d{2})\s*[~\-]\s*(\d{1,2}:\d{2})", time_text)
+        if not ymd or not match:
+            continue
+        start, end = match.group(1), match.group(2)
+        out.setdefault(ymd, []).append(
+            {
+                "timeContent": f"{start} ~ {end}",
+                "slotKey": f"{start}~{end}",
+                "courtNo": court_no,
+                "reserveUrl": reserve_url,
+            }
+        )
+    _sort_daymap(out)
+    return out
+
+
+def _fetch_hanam_day(court_code: str, court_no: str, day: date) -> tuple[str, Dict[str, List[dict]]]:
+    session = _session()
+    ymd = day.strftime("%Y%m%d")
+    yyyymm = day.strftime("%Y%m")
+    url = (
+        f"{HANAM_BASE}/www/selectMisaParkResveWeb.do"
+        f"?key=7465&yyyymm={yyyymm}&misaParkCode={court_code}"
+        f"&searchCategoryCode=B1&searchResveDate={ymd}"
+    )
+    response = session.get(url, timeout=_timeout())
+    response.raise_for_status()
+    return court_code, _parse_hanam_day(_text(response), url, court_no)
+
+
 def crawl_hanam() -> Dict[str, Any]:
+    courts = {"TS01": "1", "TS02": "2", "TS03": "3", "TS04": "4"}
     facilities = {
-        "misa-hangang-2": {
-            "title": "미사한강공원 2코트",
+        f"misa-hangang-{court_no}": {
+            "title": f"미사한강공원 {court_no}코트",
             "location": "하남시",
-            "reserveUrl": "https://www.hanam.go.kr/www/selectMisaParkResveWeb.do?key=7465&yyyymm=202607&misaParkCode=TS02&searchCategoryCode=B1",
-            "blockedReason": "하남시 미사한강공원은 날짜별 시간 조회 endpoint 추가 분석 후 슬롯 파싱 예정",
-        },
-        "hanam-sports-center": {
-            "title": "하남국민체육센터",
-            "location": "하남시",
-            "reserveUrl": "https://rent.hanamsport.or.kr/hanam_rent_ms/",
-            "blockedReason": "온라인대관서비스 화면 구조 분석 후 슬롯 파싱 예정",
-        },
+            "reserveUrl": f"{HANAM_BASE}/www/selectMisaParkResveWeb.do?key=7465&yyyymm={date.today().strftime('%Y%m')}&misaParkCode={code}&searchCategoryCode=B1",
+        }
+        for code, court_no in courts.items()
+    }
+    facilities["hanam-sports-center"] = {
+        "title": "하남국민체육센터",
+        "location": "하남시",
+        "reserveUrl": "https://rent.hanamsport.or.kr/hanam_rent_ms/",
+        "blockedReason": "온라인대관서비스 화면 구조 분석 후 슬롯 파싱 예정",
     }
     availability = {fid: _empty_daymap() for fid in facilities}
-    print(f"[HANAM][STATS] facilities={len(facilities)} slots=0 pending_parser=2")
+    tasks = [(code, court_no, day) for code, court_no in courts.items() for day in _date_values()]
+    stats = {"ok": 0, "fail": 0}
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        futures = {executor.submit(_fetch_hanam_day, code, court_no, day): (code, court_no, day) for code, court_no, day in tasks}
+        for future in as_completed(futures):
+            code, court_no, day = futures[future]
+            try:
+                _code, daymap = future.result()
+                _merge_daymap(availability[f"misa-hangang-{court_no}"], daymap)
+                stats["ok"] += 1
+            except Exception as exc:
+                stats["fail"] += 1
+                print(f"[HANAM][WARN] code={code} date={day:%Y%m%d} error={exc}")
+    for daymap in availability.values():
+        _sort_daymap(daymap)
+    slot_count = sum(len(slots) for daymap in availability.values() for slots in daymap.values())
+    print(f"[HANAM][STATS] facilities={len(facilities)} slots={slot_count} ok={stats['ok']} fail={stats['fail']} pending_parser=1")
     return {"facilities": facilities, "availability": availability}
 
 
 def crawl_uiwang() -> Dict[str, Any]:
+    session = _session()
+    min_ymd = date.today().strftime("%Y%m%d")
+    max_ymd = (date.today() + timedelta(days=45)).strftime("%Y%m%d")
+    places = [
+        ("30", "내손테니스장", "내손"),
+        ("31", "고천테니스장", "고천"),
+        ("32", "부곡테니스장", "부곡"),
+        ("35", "산빛테니스장", "산빛"),
+        ("36", "오전테니스장", "오전"),
+        ("43", "의왕테니스장 1코트", "1"),
+        ("44", "의왕테니스장 2코트", "2"),
+        ("45", "의왕테니스장 3코트", "3"),
+        ("46", "의왕테니스장 4코트", "4"),
+    ]
     facilities = {
-        "uuc-tennis": {
-            "title": "의왕도시공사 테니스장",
+        f"uuc-{place_cd}": {
+            "title": title,
             "location": "의왕시",
-            "reserveUrl": "https://reserve.uuc.or.kr/fmcs/4?facilities_type=C&base_date=20260705&center=UUC02&part=15&place=30",
-            "blockedReason": "FMCS 대관현황 상세 파라미터 확인 후 내손/고천/부곡/산빛/오전/의왕 코트 분리 예정",
-        },
-        "ggshare-cheonggye-soft": {
-            "title": "청계소프트테니스장",
-            "location": "의왕시",
-            "reserveUrl": "https://share.gg.go.kr/facilityListS11?searchArea=4143&searchType=S1_1&searchType2=%ED%85%8C%EB%8B%88%EC%8A%A4%EC%9E%A5",
-            "blockedReason": "경기공유 상세 시설 ID 확인 및 CAPTCHA 경계 확인 필요",
-        },
-        "ggshare-cheonggye-park": {
-            "title": "청계체육공원 테니스장",
-            "location": "의왕시",
-            "reserveUrl": "https://share.gg.go.kr/facilityListS11?searchArea=4143&searchType=S1_1&searchType2=%ED%85%8C%EB%8B%88%EC%8A%A4%EC%9E%A5",
-            "blockedReason": "경기공유 상세 시설 ID 확인 및 CAPTCHA 경계 확인 필요",
-        },
+            "reserveUrl": f"{UIWANG_BASE}/fmcs/4?facilities_type=L&base_date={date.today().strftime('%Y%m%d')}&center=UUC02&part=15&place={place_cd}",
+        }
+        for place_cd, title, _court_no in places
     }
+    facilities.update(
+        {
+            "ggshare-cheonggye-soft": {
+                "title": "청계소프트테니스장",
+                "location": "의왕시",
+                "reserveUrl": "https://share.gg.go.kr/facilityListS11?searchArea=4143&searchType=S1_1&searchType2=%ED%85%8C%EB%8B%88%EC%8A%A4%EC%9E%A5",
+                "blockedReason": "경기공유 상세 시설 ID 확인 및 CAPTCHA 경계 확인 필요",
+            },
+            "ggshare-cheonggye-park": {
+                "title": "청계체육공원 테니스장",
+                "location": "의왕시",
+                "reserveUrl": "https://share.gg.go.kr/facilityListS11?searchArea=4143&searchType=S1_1&searchType2=%ED%85%8C%EB%8B%88%EC%8A%A4%EC%9E%A5",
+                "blockedReason": "경기공유 상세 시설 ID 확인 및 CAPTCHA 경계 확인 필요",
+            },
+        }
+    )
     availability = {fid: _empty_daymap() for fid in facilities}
-    print(f"[UIWANG][STATS] facilities={len(facilities)} slots=0 pending_parser=3")
+    stats = {"ok": 0, "fail": 0}
+    for place_cd, _title, court_no in places:
+        fid = f"uuc-{place_cd}"
+        for yyyymm in _yyyymm_values(1):
+            url = (
+                f"{UIWANG_BASE}/rest/facilities/place_month_time_state_list"
+                f"?company_code=UUC02&part_code=15&place_code={place_cd}"
+                f"&base_date={yyyymm}01&rent_type=1001&mem_no="
+            )
+            try:
+                response = session.get(
+                    url,
+                    timeout=_timeout(),
+                    headers={
+                        "X-Requested-With": "XMLHttpRequest",
+                        "Referer": f"{UIWANG_BASE}/fmcs/4?facilities_type=L&center=UUC02&part=15&place={place_cd}",
+                    },
+                )
+                response.raise_for_status()
+                rows = response.json()
+                for row in rows if isinstance(rows, list) else []:
+                    ymd = str(row.get("date") or "").replace("-", "")
+                    if not re.fullmatch(r"\d{8}", ymd):
+                        continue
+                    if ymd < min_ymd or ymd > max_ymd:
+                        continue
+                    if int(row.get("rent_no") or 0) != 0:
+                        continue
+                    if str(row.get("use_yn") or "").upper() not in ("N", "Y"):
+                        continue
+                    start = str(row.get("start_time") or "").strip()
+                    end = str(row.get("end_time") or "").strip()
+                    time_no = str(row.get("time_no") or "").strip()
+                    time_nm = str(row.get("time_nm") or "").strip()
+                    if not start or not end or not time_no:
+                        continue
+                    time_value = quote(f"{time_no};{time_nm};{start.replace(':', '')};{end.replace(':', '')};1")
+                    reserve_url = (
+                        f"{UIWANG_BASE}/fmcs/4?facilities_type=L&center=UUC02&part=15&base_date={ymd}"
+                        f"&action=write&place={place_cd}&comcd=UUC02&part_cd=15&place_cd={place_cd}"
+                        f"&time_no={time_value}&rent_date={ymd}"
+                    )
+                    availability[fid].setdefault(ymd, []).append(
+                        {
+                            "timeContent": f"{start} ~ {end}",
+                            "slotKey": f"{start}~{end}",
+                            "courtNo": court_no,
+                            "reserveUrl": reserve_url,
+                        }
+                    )
+                stats["ok"] += 1
+            except Exception as exc:
+                stats["fail"] += 1
+                print(f"[UIWANG][WARN] place={place_cd} month={yyyymm} error={exc}")
+    for daymap in availability.values():
+        _sort_daymap(daymap)
+    slot_count = sum(len(slots) for daymap in availability.values() for slots in daymap.values())
+    print(f"[UIWANG][STATS] facilities={len(facilities)} slots={slot_count} ok={stats['ok']} fail={stats['fail']} pending_parser=2")
     return {"facilities": facilities, "availability": availability}
 
 
@@ -179,6 +328,7 @@ def _crawl_jmpss(session: requests.Session, months: Iterable[str]) -> tuple[Dict
                 _merge_daymap(daymap, _parse_reserve_links(_text(response), JMPSS_BASE, court_no))
             except Exception as exc:
                 print(f"[INCHEON][JMPSS][WARN] seq={seq} month={month} error={exc}")
+        _sort_daymap(daymap)
         availability[fid] = daymap
     return facilities, availability
 
@@ -207,6 +357,7 @@ def _crawl_ysfsmc(session: requests.Session, months: Iterable[str]) -> tuple[Dic
                 _merge_daymap(daymap, _parse_reserve_links(_text(response), YSFSMC_BASE, title.rsplit(" ", 1)[-1].replace("코트", "")))
             except Exception as exc:
                 print(f"[INCHEON][YSFSMC][WARN] seq={seq} month={month} error={exc}")
+        _sort_daymap(daymap)
         availability[fid] = daymap
     return facilities, availability
 
