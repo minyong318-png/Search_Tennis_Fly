@@ -95,6 +95,19 @@ def _sort_daymap(daymap: Dict[str, List[dict]]) -> None:
         slots.sort(key=lambda slot: str(slot.get("timeContent") or ""))
 
 
+def _decode_process_output(value: bytes | str | None) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    for encoding in ("utf-8", "cp949", "euc-kr"):
+        try:
+            return value.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return value.decode("utf-8", errors="replace")
+
+
 def _crawl_browser(target_city: str = "") -> Dict[str, Any]:
     if os.getenv("GGSHARE_BROWSER", "1") == "0":
         raise RuntimeError("GGSHARE_BROWSER disabled")
@@ -104,15 +117,16 @@ def _crawl_browser(target_city: str = "") -> Dict[str, Any]:
     proc = subprocess.run(
         ["node", str(script), target_city],
         cwd=str(Path(__file__).resolve().parent),
-        text=True,
         capture_output=True,
         timeout=int(os.getenv("GGSHARE_BROWSER_TIMEOUT", "240")),
         check=False,
     )
+    stdout = _decode_process_output(proc.stdout)
+    stderr = _decode_process_output(proc.stderr)
     if proc.returncode != 0:
-        message = (proc.stderr or proc.stdout or "").strip().splitlines()[-1:]
+        message = (stderr or stdout or "").strip().splitlines()[-1:]
         raise RuntimeError(message[0] if message else f"browser crawler failed: {proc.returncode}")
-    payload = json.loads(proc.stdout.strip().splitlines()[-1])
+    payload = json.loads(stdout.strip().splitlines()[-1])
     for daymap in (payload.get("availability") or {}).values():
         _sort_daymap(daymap)
     stats = payload.get("stats") or {}
