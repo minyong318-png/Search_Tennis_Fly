@@ -412,7 +412,7 @@ def crawl_uiwang() -> Dict[str, Any]:
     except Exception as exc:
         print(f"[UIWANG][GGSHARE][WARN] {exc}")
     slot_count = sum(len(slots) for daymap in availability.values() for slots in daymap.values())
-    print(f"[UIWANG][STATS] facilities={len(facilities)} slots={slot_count} ok={stats['ok']} fail={stats['fail']} pending_parser=2")
+    print(f"[UIWANG][STATS] facilities={len(facilities)} slots={slot_count} ok={stats['ok']} fail={stats['fail']}")
     return {"facilities": facilities, "availability": availability}
 
 

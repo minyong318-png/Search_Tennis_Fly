@@ -9,7 +9,12 @@ const STATIC_FACILITIES = [
   { city: "anseong", label: "안성", facilityId: "F0137", instiCode: "1230001", title: "고삼테니스장 1코트" },
   { city: "anseong", label: "안성", facilityId: "F0142", instiCode: "1230001", title: "팜랜드 물류단지공원 테니스장" },
   { city: "uijeongbu", label: "의정부", facilityId: "F0003", instiCode: "1130004", title: "모두의 운동장 테니스장 A코트" },
-  { city: "yangpyeong", label: "양평", facilityId: "F0004", instiCode: "4170037", title: "강하테니스장" }
+  { city: "yangpyeong", label: "양평", facilityId: "F0004", instiCode: "4170037", title: "강하테니스장" },
+  { city: "uiwang", label: "의왕", facilityId: "F0001", instiCode: "1250010", title: "청계소프트테니스장 A코트" },
+  { city: "uiwang", label: "의왕", facilityId: "F0002", instiCode: "1250010", title: "청계소프트테니스장 B코트" },
+  { city: "uiwang", label: "의왕", facilityId: "F0023", instiCode: "1250001", title: "청계체육공원 테니스장 5번 일반예약 코트" },
+  { city: "uiwang", label: "의왕", facilityId: "F0024", instiCode: "1250001", title: "청계체육공원 테니스장 2번 장기배정 코트" },
+  { city: "uiwang", label: "의왕", facilityId: "F0025", instiCode: "1250001", title: "청계체육공원 테니스장 1번 레슨코트" }
 ];
 
 const UIWANG_SEARCH_URL = `${BASE_URL}/facilityListS11?searchArea=4143&searchType=S1_1&searchType2=${encodeURIComponent("테니스장")}`;
