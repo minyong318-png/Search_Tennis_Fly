@@ -1,5 +1,10 @@
 import re
+import json
+import os
+import subprocess
+import sys
 from datetime import date, timedelta
+from pathlib import Path
 from typing import Any, Dict, List
 
 import requests
@@ -86,8 +91,47 @@ def _empty_daymap(days_ahead: int = 45) -> Dict[str, List[dict]]:
     return {(start + timedelta(days=offset)).strftime("%Y%m%d"): [] for offset in range(days_ahead + 1)}
 
 
+def _sort_daymap(daymap: Dict[str, List[dict]]) -> None:
+    for slots in daymap.values():
+        slots.sort(key=lambda slot: str(slot.get("timeContent") or ""))
+
+
+def _crawl_browser(target_city: str = "") -> Dict[str, Any]:
+    if os.getenv("GGSHARE_BROWSER", "1") == "0":
+        raise RuntimeError("GGSHARE_BROWSER disabled")
+    if not os.getenv("GGSHARE_ID") or not os.getenv("GGSHARE_PW"):
+        raise RuntimeError("GGSHARE_ID/GGSHARE_PW env missing")
+    script = Path(__file__).resolve().parent / "scripts" / "crawl_ggshare_slots.mjs"
+    proc = subprocess.run(
+        ["node", str(script), target_city],
+        cwd=str(Path(__file__).resolve().parent),
+        text=True,
+        capture_output=True,
+        timeout=int(os.getenv("GGSHARE_BROWSER_TIMEOUT", "240")),
+        check=False,
+    )
+    if proc.returncode != 0:
+        message = (proc.stderr or proc.stdout or "").strip().splitlines()[-1:]
+        raise RuntimeError(message[0] if message else f"browser crawler failed: {proc.returncode}")
+    payload = json.loads(proc.stdout.strip().splitlines()[-1])
+    for daymap in (payload.get("availability") or {}).values():
+        _sort_daymap(daymap)
+    stats = payload.get("stats") or {}
+    print(
+        "[GGSHARE_BROWSER][STATS] "
+        f"target={target_city or 'all'} ok={stats.get('ok', 0)} "
+        f"fail={stats.get('fail', 0)} slots={stats.get('slots', 0)}"
+    )
+    return {"facilities": payload.get("facilities") or {}, "availability": payload.get("availability") or {}}
+
+
 def crawl_ggshare(target_city: str = "") -> Dict[str, Any]:
     selected_city = (target_city or "").strip().lower()
+    try:
+        return _crawl_browser(selected_city)
+    except Exception as exc:
+        print(f"[GGSHARE_BROWSER][WARN] fallback to metadata-only crawl: {exc}", file=sys.stderr)
+
     items = [item for item in FACILITIES if not selected_city or item["city"] == selected_city]
 
     session = _session()

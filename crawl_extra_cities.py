@@ -401,6 +401,16 @@ def crawl_uiwang() -> Dict[str, Any]:
                 print(f"[UIWANG][WARN] place={place_cd} month={yyyymm} error={exc}")
     for daymap in availability.values():
         _sort_daymap(daymap)
+    try:
+        import crawl_ggshare
+
+        out_gg = crawl_ggshare.crawl_ggshare("uiwang")
+        for raw_fid, meta in (out_gg.get("facilities") or {}).items():
+            facilities[f"ggshare-{raw_fid}"] = meta
+        for raw_fid, daymap in (out_gg.get("availability") or {}).items():
+            availability[f"ggshare-{raw_fid}"] = daymap or {}
+    except Exception as exc:
+        print(f"[UIWANG][GGSHARE][WARN] {exc}")
     slot_count = sum(len(slots) for daymap in availability.values() for slots in daymap.values())
     print(f"[UIWANG][STATS] facilities={len(facilities)} slots={slot_count} ok={stats['ok']} fail={stats['fail']} pending_parser=2")
     return {"facilities": facilities, "availability": availability}

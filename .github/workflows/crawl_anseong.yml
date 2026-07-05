@@ -25,12 +25,16 @@ jobs:
           & $python --version
           & $python -m pip install --upgrade pip
           & $python -m pip install -r requirements.txt
+          npm install --no-save playwright
 
       - name: Run refresh (Anseong)
         shell: powershell
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           RUN_TARGET: "anseong"
+          GGSHARE_BROWSER: "1"
+          GGSHARE_ID: ${{ secrets.GGSHARE_ID }}
+          GGSHARE_PW: ${{ secrets.GGSHARE_PW }}
           VAPID_PUBLIC_KEY: ${{ secrets.VAPID_PUBLIC_KEY }}
           VAPID_PRIVATE_KEY: ${{ secrets.VAPID_PRIVATE_KEY }}
           VAPID_SUBJECT: ${{ secrets.VAPID_SUBJECT }}
