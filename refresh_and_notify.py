@@ -784,6 +784,35 @@ def prune_stale_yongin_facilities(
     )
     return deleted_facilities, deleted_snapshots
 
+
+def prune_stale_prefix_facilities(
+    conn: psycopg.Connection,
+    prefix: str,
+    current_facility_ids: Iterable[str],
+    min_current_count: int = 1,
+) -> Tuple[int, int]:
+    keep_ids = sorted({str(fid) for fid in current_facility_ids if str(fid).startswith(prefix)})
+    if len(keep_ids) < min_current_count:
+        print(f"[PRUNE] prefix={prefix} skipped: current facility ids too small ({len(keep_ids)}<{min_current_count})")
+        return 0, 0
+
+    deleted_cache = 0
+    deleted_facilities = 0
+    with conn.cursor() as cur:
+        cur.execute(
+            "delete from public.availability_cache where facility_id like %s and not (facility_id = any(%s))",
+            (f"{prefix}%", keep_ids),
+        )
+        deleted_cache = cur.rowcount or 0
+        cur.execute(
+            "delete from public.facilities where facility_id like %s and not (facility_id = any(%s))",
+            (f"{prefix}%", keep_ids),
+        )
+        deleted_facilities = cur.rowcount or 0
+    conn.commit()
+    print(f"[PRUNE] prefix={prefix} keep={len(keep_ids)} deleted_facilities={deleted_facilities} deleted_cache={deleted_cache}")
+    return deleted_facilities, deleted_cache
+
 def clear_availability_cache_for_target(
     conn: psycopg.Connection,
     target: str,
@@ -1251,6 +1280,12 @@ def main() -> None:
             upsert_facilities_for_frontend(conn, facilities_for_write)
             if clear_target in ("all", "yongin"):
                 prune_stale_yongin_facilities(conn, facilities_for_write.keys())
+            if clear_target in ("all", "hanam"):
+                prune_stale_prefix_facilities(conn, "hanam:", facilities_for_write.keys())
+            if clear_target in ("all", "uiwang"):
+                prune_stale_prefix_facilities(conn, "uiwang:", facilities_for_write.keys())
+            if clear_target in ("all", "incheon"):
+                prune_stale_prefix_facilities(conn, "incheon:", facilities_for_write.keys())
             upsert_availability_cache_for_frontend(
                 conn,
                 facilities_for_write,
