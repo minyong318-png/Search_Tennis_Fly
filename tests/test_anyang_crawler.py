@@ -86,7 +86,24 @@ class AnyangCrawlerTests(unittest.TestCase):
         import crawl_anyang
 
         with patch.dict(os.environ, {}, clear=True):
-            self.assertLessEqual(crawl_anyang._max_workers(), 2)
+            self.assertLessEqual(crawl_anyang._max_workers(), 1)
+
+    def test_fetch_day_does_not_repeat_warmup_for_each_date(self):
+        import crawl_anyang
+
+        response = Mock()
+        response.encoding = "utf-8"
+        response.text = "<html></html>"
+        response.raise_for_status.return_value = None
+        session = Mock()
+        session.get.return_value = response
+
+        with patch.object(crawl_anyang, "_session", return_value=session), patch.object(
+            crawl_anyang, "_warmup"
+        ) as warmup:
+            crawl_anyang._fetch_day(1, "2026-07-06")
+
+        warmup.assert_not_called()
 
     def test_crawl_all_includes_anyang_target_with_namespaced_ids(self):
         import refresh_and_notify

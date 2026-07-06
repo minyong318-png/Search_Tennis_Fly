@@ -193,7 +193,6 @@ def _warmup(session: requests.Session) -> None:
 
 def _fetch_day(court_value: int, ymd: str) -> tuple[int, str, Dict[str, List[dict]]]:
     session = _session()
-    _warmup(session)
     url = f"{DAILY_URL}/{court_value}/{ymd}"
     response = session.get(url, timeout=_request_timeout(), headers={"Referer": f"{DAILY_URL}/{court_value}"})
     response.raise_for_status()

@@ -121,6 +121,23 @@ class PajuCrawlerTests(unittest.TestCase):
         slot = out["availability"]["pjtennis-1-1"]["20260629"][0]
         self.assertEqual(slot["reserveUrl"], "https://www.pjtennis.or.kr/daily/1")
 
+    def test_fetch_day_does_not_repeat_warmup_for_each_date(self):
+        import crawl_paju
+
+        response = Mock()
+        response.encoding = "utf-8"
+        response.text = "<html></html>"
+        response.raise_for_status.return_value = None
+        session = Mock()
+        session.get.return_value = response
+
+        with patch.object(crawl_paju, "_session", return_value=session), patch.object(
+            crawl_paju, "_warmup"
+        ) as warmup:
+            crawl_paju._fetch_day(1, "2026-07-06")
+
+        warmup.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()
