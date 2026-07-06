@@ -3,7 +3,7 @@ import os
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List
 
 import requests
@@ -102,7 +102,27 @@ def _is_reservable_time_label(label: str) -> bool:
     return RESERVABLE_START_MINUTE <= start and end <= RESERVABLE_END_MINUTE
 
 
-def parse_paju_slots(html: str) -> Dict[str, List[dict]]:
+def _now_kst() -> datetime:
+    return datetime.now(timezone.utc).astimezone(timezone(timedelta(hours=9))).replace(tzinfo=None)
+
+
+def _is_future_start(ymd: str | None, label: str, now: datetime | None = None) -> bool:
+    if not ymd:
+        return True
+    now = now or _now_kst()
+    normalized = ymd.replace("-", "")
+    today = now.strftime("%Y%m%d")
+    if normalized != today:
+        return True
+    match = TIME_RE.search(label or "")
+    if not match:
+        return True
+    start = _time_to_minutes(match.group(1))
+    current = now.hour * 60 + now.minute
+    return start > current
+
+
+def parse_paju_slots(html: str, ymd: str | None = None, now: datetime | None = None) -> Dict[str, List[dict]]:
     soup = BeautifulSoup(html, "lxml")
 
     time_labels: List[str] = []
@@ -129,6 +149,8 @@ def parse_paju_slots(html: str) -> Dict[str, List[dict]]:
                 continue
             label = time_labels[idx] if idx < len(time_labels) else f"IDX:{idx}"
             if not _is_reservable_time_label(label):
+                continue
+            if not _is_future_start(ymd, label, now):
                 continue
             match_time = TIME_RE.search(label)
             if match_time:
@@ -178,7 +200,8 @@ def _fetch_day(court_value: int, ymd: str) -> tuple[int, str, Dict[str, List[dic
     html = _text(response)
     if "location.replace" in html and len(html) < 500:
         raise RuntimeError(f"redirect script returned for {url}")
-    return court_value, ymd.replace("-", ""), parse_paju_slots(html)
+    yyyymmdd = ymd.replace("-", "")
+    return court_value, yyyymmdd, parse_paju_slots(html, ymd=yyyymmdd)
 
 
 def crawl_paju() -> Dict[str, Any]:

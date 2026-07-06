@@ -1,6 +1,7 @@
 import os
 import sys
 import unittest
+from datetime import datetime
 from unittest.mock import Mock, patch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
@@ -33,6 +34,34 @@ class PajuCrawlerTests(unittest.TestCase):
                     {
                         "timeContent": "07:00 ~ 08:00",
                         "slotKey": "07:00~08:00",
+                        "courtNo": "1",
+                    }
+                ],
+            },
+        )
+
+    def test_parse_paju_slots_skips_today_slots_that_already_started(self):
+        from crawl_paju import parse_paju_slots
+
+        html = """
+        <table class="custom">
+          <tr><td class="wide">17<span class="courtTime">:00</span> ~ 18<span class="courtTime">:00</span></td></tr>
+          <tr><td class="wide">18<span class="courtTime">:00</span> ~ 19<span class="courtTime">:00</span></td></tr>
+        </table>
+        <table class="innerCustom">
+          <tr><td class="courtTag">1 <span>Court</span></td></tr>
+          <tr><td class="resTag"><input type="checkbox" value="2026-07-06|1|1|17|3000" /></td></tr>
+          <tr><td class="resTag"><input type="checkbox" value="2026-07-06|1|1|18|3000" /></td></tr>
+        </table>
+        """
+
+        self.assertEqual(
+            parse_paju_slots(html, ymd="20260706", now=datetime(2026, 7, 6, 17, 30)),
+            {
+                "1": [
+                    {
+                        "timeContent": "18:00 ~ 19:00",
+                        "slotKey": "18:00~19:00",
                         "courtNo": "1",
                     }
                 ],
