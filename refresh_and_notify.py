@@ -1150,6 +1150,12 @@ def count_slots_for_prefix(availability: Dict[str, Dict[str, List[Any]]], prefix
         for slots in (day_map or {}).values():
             total += len(slots or [])
     return total
+
+
+def should_protect_cache(slot_count: int, partial_failure: bool = False, protect_zero_slots: bool = True) -> bool:
+    return bool(partial_failure) or (protect_zero_slots and slot_count == 0)
+
+
 # =========================================================
 # Push
 # =========================================================
@@ -1208,17 +1214,23 @@ def main() -> None:
 
     anyang_slots = count_slots_for_prefix(availability, "anyang:")
     anyang_partial_failure = bool(getattr(crawl_anyang, "LAST_PARTIAL_FAILURE", False))
-    protect_anyang_cache = target in ("all", "anyang") and (anyang_slots == 0 or anyang_partial_failure)
+    protect_anyang_cache = target in ("all", "anyang") and should_protect_cache(
+        anyang_slots,
+        anyang_partial_failure,
+        protect_zero_slots=False,
+    )
     if protect_anyang_cache:
-        reason = "partial_failure" if anyang_partial_failure else "slots=0"
-        print(f"[ANYANG][SAFEGUARD] {reason}; keep existing anyang cache")
+        print("[ANYANG][SAFEGUARD] partial_failure; keep existing anyang cache")
 
     paju_slots = count_slots_for_prefix(availability, "paju:")
     paju_partial_failure = bool(getattr(crawl_paju, "LAST_PARTIAL_FAILURE", False))
-    protect_paju_cache = target in ("all", "paju") and (paju_slots == 0 or paju_partial_failure)
+    protect_paju_cache = target in ("all", "paju") and should_protect_cache(
+        paju_slots,
+        paju_partial_failure,
+        protect_zero_slots=False,
+    )
     if protect_paju_cache:
-        reason = "partial_failure" if paju_partial_failure else "slots=0"
-        print(f"[PAJU][SAFEGUARD] {reason}; keep existing paju cache")
+        print("[PAJU][SAFEGUARD] partial_failure; keep existing paju cache")
 
     yongin_failed_dates = int(getattr(tennis_core, "CRAWL_STATS", {}).get("time_failed", 0) or 0)
     yongin_slots = count_slots_for_prefix(availability, "yongin:")
