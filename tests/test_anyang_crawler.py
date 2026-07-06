@@ -82,11 +82,42 @@ class AnyangCrawlerTests(unittest.TestCase):
             },
         )
 
+    def test_parse_anyang_slots_accepts_res_tag_title_available(self):
+        from crawl_anyang import parse_anyang_slots
+
+        html = """
+        <table class="custom">
+          <tr><td class="wide">07<span class="courtTime">:00</span> ~ 08<span class="courtTime">:00</span></td></tr>
+          <tr><td class="wide">08<span class="courtTime">:00</span> ~ 09<span class="courtTime">:00</span></td></tr>
+          <tr><td class="wide">21<span class="courtTime">:00</span> ~ 22<span class="courtTime">:00</span></td></tr>
+        </table>
+        <table class="innerCustom">
+          <tr><td class="courtTag">1 <span>코트</span></td></tr>
+          <tr><td class="resTag" title="예약가능"><span class="publicStatus"></span></td></tr>
+          <tr><td class="resTag" title="예약됨"><span class="publicStatus"></span></td></tr>
+          <tr><td class="resTag" title="예약가능"><span class="publicStatus"></span></td></tr>
+        </table>
+        """
+
+        self.assertEqual(
+            parse_anyang_slots(html),
+            {
+                "1": [
+                    {
+                        "timeContent": "07:00 ~ 08:00",
+                        "slotKey": "07:00~08:00",
+                        "courtNo": "1",
+                    }
+                ],
+            },
+        )
+
     def test_anyang_default_worker_count_is_conservative_to_avoid_429(self):
         import crawl_anyang
 
         with patch.dict(os.environ, {}, clear=True):
             self.assertLessEqual(crawl_anyang._max_workers(), 1)
+            self.assertGreaterEqual(crawl_anyang._request_delay(), 1.0)
 
     def test_fetch_day_does_not_repeat_warmup_for_each_date(self):
         import crawl_anyang
@@ -100,10 +131,11 @@ class AnyangCrawlerTests(unittest.TestCase):
 
         with patch.object(crawl_anyang, "_session", return_value=session), patch.object(
             crawl_anyang, "_warmup"
-        ) as warmup:
+        ) as warmup, patch.object(crawl_anyang.time, "sleep") as sleep:
             crawl_anyang._fetch_day(1, "2026-07-06")
 
         warmup.assert_not_called()
+        sleep.assert_called()
 
     def test_crawl_all_includes_anyang_target_with_namespaced_ids(self):
         import refresh_and_notify

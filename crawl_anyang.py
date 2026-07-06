@@ -43,6 +43,14 @@ def _max_workers() -> int:
         return 8
 
 
+def _request_delay() -> float:
+    raw = (os.getenv("ANYANG_REQUEST_DELAY") or "1.2").strip()
+    try:
+        return max(0.0, min(float(raw), 10.0))
+    except ValueError:
+        return 1.2
+
+
 def _session() -> requests.Session:
     retry = Retry(
         total=3,
@@ -138,7 +146,9 @@ def parse_anyang_slots(html: str, ymd: str | None = None, now: datetime | None =
             cell = row.select_one("td.resTag")
             if not cell:
                 continue
-            if not cell.select_one('input[type="checkbox"]:not([disabled])'):
+            is_available = (cell.get("title") or "").strip() == "예약가능"
+            is_available = is_available or bool(cell.select_one('input[type="checkbox"]:not([disabled])'))
+            if not is_available:
                 continue
             label = time_labels[idx] if idx < len(time_labels) else f"IDX:{idx}"
             if not _is_reservable_time_label(label):
@@ -186,6 +196,9 @@ def _warmup(session: requests.Session) -> None:
 
 def _fetch_day(court_value: int, ymd: str) -> tuple[int, str, Dict[str, List[dict]]]:
     session = _session()
+    delay = _request_delay()
+    if delay:
+        time.sleep(delay)
     url = f"{DAILY_URL}/{court_value}/{ymd}"
     response = session.get(url, timeout=_request_timeout(), headers={"Referer": f"{DAILY_URL}/{court_value}"})
     response.raise_for_status()

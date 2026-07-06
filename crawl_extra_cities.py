@@ -5,7 +5,7 @@ import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, timedelta
 from typing import Any, Dict, Iterable, List
-from urllib.parse import quote, urljoin
+from urllib.parse import urljoin
 
 import requests
 from bs4 import BeautifulSoup
@@ -261,7 +261,7 @@ def crawl_hanam() -> Dict[str, Any]:
         for idx in range(1, 9):
             play_code = f"{idx:02d}"
             facilities[f"sports-center-{place_code}-{play_code}"] = {
-                "title": f"{title} {idx}\uba74",
+                "title": f"{title} {idx}\ucf54\ud2b8",
                 "location": "\ud558\ub0a8\uc2dc",
                 "reserveUrl": f"{HANAM_SPORTS_BASE}/?place_code={place_code}",
             }
@@ -381,11 +381,9 @@ def crawl_uiwang() -> Dict[str, Any]:
                     time_nm = str(row.get("time_nm") or "").strip()
                     if not start or not end or not time_no:
                         continue
-                    time_value = quote(f"{time_no};{time_nm};{start.replace(':', '')};{end.replace(':', '')};1")
                     reserve_url = (
-                        f"{UIWANG_BASE}/fmcs/4?facilities_type=L&rent_type=1001&center=UUC02&part=15&base_date={ymd}"
-                        f"&action=write&place={place_cd}&comcd=UUC02&part_cd=15&place_cd={place_cd}"
-                        f"&time_no={time_value}&rent_date={ymd}"
+                        f"{UIWANG_BASE}/fmcs/4?facilities_type=L&base_date={ymd}"
+                        f"&rent_type=1001&center=UUC02&part=15&place={place_cd}#type_calendar"
                     )
                     availability[fid].setdefault(ymd, []).append(
                         {
