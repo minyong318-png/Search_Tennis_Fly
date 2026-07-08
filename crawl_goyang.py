@@ -201,6 +201,26 @@ def parse_gytennis_slots(html: str) -> Dict[str, List[dict]]:
     return out
 
 
+def _compact_ymd(value: str) -> str:
+    return re.sub(r"\D", "", value or "")
+
+
+def gytennis_html_matches_date(html: str, ymd: str) -> bool:
+    soup = BeautifulSoup(html or "", "lxml")
+    expected = _compact_ymd(ymd)
+    if not expected:
+        return False
+    values = [
+        inp.get("value", "")
+        for inp in soup.select('input[name="cdate"], input#cdate, input[name*="date" i]')
+    ]
+    for value in values:
+        compact = _compact_ymd(value)
+        if compact and compact == expected:
+            return True
+    return False
+
+
 def fetch_gytennis_day(
     session: requests.Session,
     courtvalue: int,
@@ -294,18 +314,18 @@ def fetch_gytennis_day(
         r = _fetch_via_form(True)
 
     html = fix_encoding(r) if r.status_code == 200 else ""
-    if r.status_code != 200 or not _valid_slots_html(html):
+    if r.status_code != 200 or not _valid_slots_html(html) or not gytennis_html_matches_date(html, ymd):
         # fallback 1: ?? URL GET
         try:
             r2 = _get(url, bool((ssl_fallback_state or {}).get("use_insecure")))
             html2 = fix_encoding(r2) if r2.status_code == 200 else ""
-            if r2.status_code == 200 and _valid_slots_html(html2):
+            if r2.status_code == 200 and _valid_slots_html(html2) and gytennis_html_matches_date(html2, ymd):
                 html = html2
             else:
                 # fallback 2: compact ?? URL
                 r3 = _get(url_alt, bool((ssl_fallback_state or {}).get("use_insecure")))
                 html3 = fix_encoding(r3) if r3.status_code == 200 else ""
-                if r3.status_code == 200 and _valid_slots_html(html3):
+                if r3.status_code == 200 and _valid_slots_html(html3) and gytennis_html_matches_date(html3, ymd):
                     html = html3
                 else:
                     return {}
@@ -314,12 +334,12 @@ def fetch_gytennis_day(
                 ssl_fallback_state["use_insecure"] = True
             r2 = _get(url, True)
             html2 = fix_encoding(r2) if r2.status_code == 200 else ""
-            if r2.status_code == 200 and _valid_slots_html(html2):
+            if r2.status_code == 200 and _valid_slots_html(html2) and gytennis_html_matches_date(html2, ymd):
                 html = html2
             else:
                 r3 = _get(url_alt, True)
                 html3 = fix_encoding(r3) if r3.status_code == 200 else ""
-                if r3.status_code == 200 and _valid_slots_html(html3):
+                if r3.status_code == 200 and _valid_slots_html(html3) and gytennis_html_matches_date(html3, ymd):
                     html = html3
                 else:
                     return {}
@@ -339,7 +359,7 @@ def fetch_gytennis_day(
         if rr.status_code != 200:
             continue
         hh = fix_encoding(rr)
-        if not _valid_slots_html(hh):
+        if not _valid_slots_html(hh) or not gytennis_html_matches_date(hh, ymd):
             continue
         parsed2 = parse_gytennis_slots(hh)
         cnt2 = sum(len(v) for v in parsed2.values()) if parsed2 else 0

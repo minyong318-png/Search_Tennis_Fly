@@ -1,6 +1,9 @@
 ﻿name: Crawl Goyang & Notify
 
 on:
+  schedule:
+    # Daily Goyang crawler health refresh at 09:10 KST.
+    - cron: "10 0 * * *"
   workflow_dispatch:
     inputs:
       force:
