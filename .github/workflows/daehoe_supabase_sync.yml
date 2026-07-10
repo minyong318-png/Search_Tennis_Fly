@@ -1,0 +1,53 @@
+name: Daehoe Supabase Sync
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Full initialization or monthly incremental sync
+        required: true
+        type: choice
+        options:
+          - incremental
+          - full
+        default: incremental
+      months:
+        description: Optional YYYY-MM comma-separated override
+        required: false
+        type: string
+  schedule:
+    # 09:30 KST, after the local phone crawl window.
+    - cron: "30 0 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: daehoe-supabase-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout Daehoe project
+        uses: actions/checkout@v4
+        with:
+          repository: minyong318-png/search_tennis_cloudflared
+          path: daehoe
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install PostgreSQL client
+        run: python -m pip install "psycopg[binary]==3.2.9"
+
+      - name: Sync tournament snapshot
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DAEHOE_SYNC_MODE: ${{ inputs.mode || 'incremental' }}
+          DAEHOE_REFRESH_MONTHS: ${{ inputs.months || '' }}
+        run: |
+          python daehoe/PagesDaehoeIssum/scripts/sync_supabase_postgres.py
