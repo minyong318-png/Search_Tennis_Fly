@@ -55,6 +55,13 @@ try {
   & $adb forward "tcp:$Port" "localabstract:chrome_devtools_remote" | Out-Host
   $env:RUN_TARGET = "seongnam"
   $env:SEONGNAM_COLLECTOR_MODE = "android"
+  if (-not $env:SEONGNAM_DAYS_AHEAD) { $env:SEONGNAM_DAYS_AHEAD = "7" }
+  if (-not $env:SEONGNAM_ANDROID_TIMEOUT_MS) { $env:SEONGNAM_ANDROID_TIMEOUT_MS = "600000" }
+  if (-not $env:SEONGNAM_ANDROID_RUN_TIMEOUT) { $env:SEONGNAM_ANDROID_RUN_TIMEOUT = "900" }
+  if (-not $env:SEONGNAM_ANDROID_FETCH_TIMEOUT_MS) { $env:SEONGNAM_ANDROID_FETCH_TIMEOUT_MS = "10000" }
+  if (-not $env:SEONGNAM_ANDROID_CONCURRENCY) { $env:SEONGNAM_ANDROID_CONCURRENCY = "16" }
+  if (-not $env:SEONGNAM_ANDROID_BATCH_SIZE) { $env:SEONGNAM_ANDROID_BATCH_SIZE = "120" }
+  if (-not $env:SEONGNAM_ANDROID_FETCH_RETRIES) { $env:SEONGNAM_ANDROID_FETCH_RETRIES = "1" }
   & $Python refresh_and_notify.py
   exit $LASTEXITCODE
 } finally {

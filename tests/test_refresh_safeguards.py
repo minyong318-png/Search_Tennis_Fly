@@ -57,6 +57,26 @@ class RefreshSafeguardTests(unittest.TestCase):
             should_protect_cache(slot_count=0, partial_failure=True, protect_zero_slots=False)
         )
 
+    def test_successful_crawl_result_stamps_facility_updated_time(self):
+        import refresh_and_notify
+
+        result = {
+            "facilities": {"rid": {"title": "court"}},
+            "availability": {"rid": {"20260712": []}},
+            "diagnostic": {
+                "status": "normal",
+                "last_success_at": "2026-07-12T12:34:56+00:00",
+                "finished_at": "2026-07-12T12:35:00+00:00",
+            },
+        }
+
+        stamped = refresh_and_notify._stamp_crawl_result(result)
+
+        self.assertEqual(
+            "2026-07-12T12:34:56+00:00",
+            stamped["facilities"]["rid"]["_crawled_at"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

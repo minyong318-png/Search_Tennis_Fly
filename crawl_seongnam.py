@@ -216,6 +216,22 @@ def _ensure_authenticated_session(session: requests.Session) -> bool:
     return _login(session)
 
 
+def _android_collector_timeout() -> int:
+    raw_timeout = (os.getenv("SEONGNAM_ANDROID_RUN_TIMEOUT") or "").strip()
+    if raw_timeout:
+        try:
+            return max(45, min(int(float(raw_timeout)), 3600))
+        except ValueError:
+            pass
+    raw_deadline_ms = (os.getenv("SEONGNAM_ANDROID_TIMEOUT_MS") or "").strip()
+    if raw_deadline_ms:
+        try:
+            return max(45, min(int(float(raw_deadline_ms) / 1000) + 60, 3600))
+        except ValueError:
+            pass
+    return int(max(45, min(_request_timeout() * 30, 900)))
+
+
 def _run_android_collector() -> dict:
     script_path = os.path.join(os.path.dirname(__file__), "scripts", "seongnam_android_collector.mjs")
     try:
@@ -227,7 +243,7 @@ def _run_android_collector() -> dict:
             capture_output=True,
             text=True,
             encoding="utf-8",
-            timeout=int(max(45, min(_request_timeout() * 30, 240))),
+            timeout=_android_collector_timeout(),
         )
     except (OSError, subprocess.SubprocessError) as exc:
         return {

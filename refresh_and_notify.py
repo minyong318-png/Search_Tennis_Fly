@@ -53,6 +53,46 @@ def set_crawl_exit_node(scope: str, enabled: bool) -> None:
     print(f"[{scope}][TAILSCALE] exit-node {'enabled' if enabled else 'disabled'}")
 
 
+def _parse_crawled_at(value: Any) -> Optional[datetime]:
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    if not value:
+        return None
+    try:
+        text = str(value).strip().replace("Z", "+00:00")
+        parsed = datetime.fromisoformat(text)
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
+def _result_crawled_at(result: Dict[str, Any]) -> Optional[str]:
+    diagnostic = (result or {}).get("diagnostic") or {}
+    if diagnostic.get("status") in {"normal", "no_reservations"}:
+        return diagnostic.get("last_success_at") or diagnostic.get("finished_at")
+    return None
+
+
+def _stamp_meta(meta: Any, crawled_at: Optional[str]) -> Any:
+    if not isinstance(meta, dict) or not crawled_at:
+        return meta
+    stamped = dict(meta)
+    stamped["_crawled_at"] = crawled_at
+    return stamped
+
+
+def _stamp_crawl_result(result: Dict[str, Any]) -> Dict[str, Any]:
+    crawled_at = _result_crawled_at(result)
+    if not crawled_at:
+        return result
+    stamped = dict(result)
+    stamped["facilities"] = {
+        fid: _stamp_meta(meta, crawled_at)
+        for fid, meta in ((result or {}).get("facilities") or {}).items()
+    }
+    return stamped
+
+
 def to_yyyymmdd(s: str) -> str:
     """
     alarms.date가 "YYYY-MM-DD" 또는 "YYYYMMDD" 둘 다 올 수 있음.
@@ -402,12 +442,12 @@ def crawl_all() -> Tuple[Dict[str, Any], Dict[str, Dict[str, List[Any]]]]:
     if target in ("all", "yongin"):
         set_crawl_exit_node("YONGIN", True)
         try:
-            y_out = run_crawler(
+            y_out = _stamp_crawl_result(run_crawler(
                 "yongin",
                 "publicsports",
                 tennis_core.BASE_URL,
                 lambda: dict(zip(("facilities", "availability"), tennis_core.run_all())),
-            )
+            ))
             y_fac, y_av = y_out.get("facilities", {}), y_out.get("availability", {})
         finally:
             set_crawl_exit_node("YONGIN", False)
@@ -430,7 +470,7 @@ def crawl_all() -> Tuple[Dict[str, Any], Dict[str, Dict[str, List[Any]]]]:
         started = time.perf_counter()
         set_crawl_exit_node("GYT", True)
         try:
-            out_g1 = run_crawler("goyang", "gytennis", "https://www.gytennis.or.kr/", crawl_goyang.crawl_gytennis)
+            out_g1 = _stamp_crawl_result(run_crawler("goyang", "gytennis", "https://www.gytennis.or.kr/", crawl_goyang.crawl_gytennis))
         finally:
             set_crawl_exit_node("GYT", False)
         print(f"[GYT][ELAPSED] seconds={time.perf_counter() - started:.2f}")
@@ -438,7 +478,7 @@ def crawl_all() -> Tuple[Dict[str, Any], Dict[str, Dict[str, List[Any]]]]:
         # ✅ daehwa는 로그인정보 없으면 스킵(실패로 전체 종료 방지)
         try:
             started = time.perf_counter()
-            out_g2 = run_crawler("goyang", "daehwa", "https://daehwa.gys.or.kr:451/rent/tennis_rent.php", crawl_goyang.crawl_daehwa)
+            out_g2 = _stamp_crawl_result(run_crawler("goyang", "daehwa", "https://daehwa.gys.or.kr:451/rent/tennis_rent.php", crawl_goyang.crawl_daehwa))
             print(f"[DAEHWA][ELAPSED] seconds={time.perf_counter() - started:.2f}")
         except Exception as e:
             print("[DAEHWA] skipped:", e)
@@ -446,7 +486,7 @@ def crawl_all() -> Tuple[Dict[str, Any], Dict[str, Dict[str, List[Any]]]]:
 
         try:
             started = time.perf_counter()
-            out_g3 = run_crawler("goyang", "baekseok", "https://gbc.gys.or.kr:446/rent/tennis_rent.php?part_opt=07", crawl_goyang.crawl_baekseok)
+            out_g3 = _stamp_crawl_result(run_crawler("goyang", "baekseok", "https://gbc.gys.or.kr:446/rent/tennis_rent.php?part_opt=07", crawl_goyang.crawl_baekseok))
             print(f"[BAEKSEOK][ELAPSED] seconds={time.perf_counter() - started:.2f}")
         except Exception as e:
             print("[BAEKSEOK] skipped:", e)
@@ -633,7 +673,7 @@ def crawl_all() -> Tuple[Dict[str, Any], Dict[str, Dict[str, List[Any]]]]:
     if target in ("all", "suwon"):
         set_crawl_exit_node("SUWON", True)
         try:
-            out_s = run_crawler("suwon", "mpsports", crawl_suwon.CALENDAR_URL, crawl_suwon.crawl_suwon)
+            out_s = _stamp_crawl_result(run_crawler("suwon", "mpsports", crawl_suwon.CALENDAR_URL, crawl_suwon.crawl_suwon))
         finally:
             set_crawl_exit_node("SUWON", False)
         for raw_fid, meta in (out_s.get("facilities") or {}).items():
@@ -647,7 +687,7 @@ def crawl_all() -> Tuple[Dict[str, Any], Dict[str, Dict[str, List[Any]]]]:
     if target in ("all", "seongnam"):
         set_crawl_exit_node("SEONGNAM", True)
         try:
-            out_sn = run_crawler("seongnam", "isdc", crawl_seongnam.LIST_URL, crawl_seongnam.crawl_seongnam)
+            out_sn = _stamp_crawl_result(run_crawler("seongnam", "isdc", crawl_seongnam.LIST_URL, crawl_seongnam.crawl_seongnam))
         finally:
             set_crawl_exit_node("SEONGNAM", False)
         for raw_fid, meta in (out_sn.get("facilities") or {}).items():
@@ -661,7 +701,7 @@ def crawl_all() -> Tuple[Dict[str, Any], Dict[str, Dict[str, List[Any]]]]:
     if target in ("all", "anyang"):
         set_crawl_exit_node("ANYANG", True)
         try:
-            out_ay = run_crawler("anyang", "aytennis", crawl_anyang.BASE_URL, crawl_anyang.crawl_anyang)
+            out_ay = _stamp_crawl_result(run_crawler("anyang", "aytennis", crawl_anyang.BASE_URL, crawl_anyang.crawl_anyang))
         finally:
             set_crawl_exit_node("ANYANG", False)
         for raw_fid, meta in (out_ay.get("facilities") or {}).items():
@@ -675,7 +715,7 @@ def crawl_all() -> Tuple[Dict[str, Any], Dict[str, Dict[str, List[Any]]]]:
     if target in ("all", "paju"):
         set_crawl_exit_node("PAJU", True)
         try:
-            out_pj = run_crawler("paju", "pjtennis", crawl_paju.BASE_URL, crawl_paju.crawl_paju)
+            out_pj = _stamp_crawl_result(run_crawler("paju", "pjtennis", crawl_paju.BASE_URL, crawl_paju.crawl_paju))
         finally:
             set_crawl_exit_node("PAJU", False)
         for raw_fid, meta in (out_pj.get("facilities") or {}).items():
@@ -689,12 +729,12 @@ def crawl_all() -> Tuple[Dict[str, Any], Dict[str, Dict[str, List[Any]]]]:
     for gg_city in ("anseong", "uijeongbu", "yangpyeong"):
         if target not in ("all", gg_city):
             continue
-        out_gg = run_crawler(
+        out_gg = _stamp_crawl_result(run_crawler(
             gg_city,
             "ggshare",
             crawl_ggshare.BASE_URL,
             lambda city=gg_city: crawl_ggshare.crawl_ggshare(city),
-        )
+        ))
         if out_gg.get("diagnostic", {}).get("status") not in {"normal", "no_reservations"}:
             LAST_FAILED_PREFIXES.add(f"{gg_city}:")
         for raw_fid, meta in (out_gg.get("facilities") or {}).items():
@@ -706,7 +746,7 @@ def crawl_all() -> Tuple[Dict[str, Any], Dict[str, Dict[str, List[Any]]]]:
     # (H) Extra city sources
     # -----------------------------
     if target in ("all", "hanam"):
-        out_hn = run_crawler("hanam", "hanam", crawl_extra_cities.HANAM_BASE, crawl_extra_cities.crawl_hanam)
+        out_hn = _stamp_crawl_result(run_crawler("hanam", "hanam", crawl_extra_cities.HANAM_BASE, crawl_extra_cities.crawl_hanam))
         if out_hn.get("diagnostic", {}).get("status") not in {"normal", "no_reservations"}:
             LAST_FAILED_PREFIXES.add("hanam:")
         for raw_fid, meta in (out_hn.get("facilities") or {}).items():
@@ -715,14 +755,14 @@ def crawl_all() -> Tuple[Dict[str, Any], Dict[str, Dict[str, List[Any]]]]:
             availability[_ns_hanam_id(str(raw_fid))] = daymap or {}
 
     if target in ("all", "uiwang"):
-        out_uw = run_crawler("uiwang", "uiwang", crawl_extra_cities.UIWANG_BASE, crawl_extra_cities.crawl_uiwang)
+        out_uw = _stamp_crawl_result(run_crawler("uiwang", "uiwang", crawl_extra_cities.UIWANG_BASE, crawl_extra_cities.crawl_uiwang))
         for raw_fid, meta in (out_uw.get("facilities") or {}).items():
             facilities[_ns_uiwang_id(str(raw_fid))] = meta
         for raw_fid, daymap in (out_uw.get("availability") or {}).items():
             availability[_ns_uiwang_id(str(raw_fid))] = daymap or {}
 
     if target in ("all", "incheon"):
-        out_ic = run_crawler("incheon", "incheon", crawl_extra_cities.JMPSS_BASE, crawl_extra_cities.crawl_incheon)
+        out_ic = _stamp_crawl_result(run_crawler("incheon", "incheon", crawl_extra_cities.JMPSS_BASE, crawl_extra_cities.crawl_incheon))
         for raw_fid, meta in (out_ic.get("facilities") or {}).items():
             facilities[_ns_incheon_id(str(raw_fid))] = meta
         for raw_fid, daymap in (out_ic.get("availability") or {}).items():
@@ -737,13 +777,15 @@ def upsert_facilities_for_frontend(conn: psycopg.Connection, facilities: Dict[st
     rows = []
     for fid, v in facilities.items():
         fid = str(fid)
+        row_ts = ts
         if isinstance(v, dict):
             title = v.get("title") or v.get("name") or v.get("facility_name") or f"RID {fid}"
             location = v.get("location") or ""
+            row_ts = _parse_crawled_at(v.get("_crawled_at")) or ts
         else:
             title = str(v) if v is not None else f"RID {fid}"
             location = ""
-        rows.append((fid, title, location, ts))
+        rows.append((fid, title, location, row_ts))
 
     if not rows:
         return
@@ -955,6 +997,10 @@ def upsert_availability_cache_for_frontend(
 
     for fid, day_map in availability.items():
         fid = str(fid)
+        facility_meta = facilities.get(fid) if isinstance(facilities, dict) else None
+        row_ts = ts
+        if isinstance(facility_meta, dict):
+            row_ts = _parse_crawled_at(facility_meta.get("_crawled_at")) or ts
         for ymd, slots in (day_map or {}).items():
             ymd = (ymd or "").strip()
             if len(ymd) != 8:
@@ -969,7 +1015,7 @@ def upsert_availability_cache_for_frontend(
             fallback_resve_id = _strip_yongin_resve_id(fid)
 
             arr = [slot_obj_for_frontend(s, fallback_resve_id) for s in (slots or []) if slot_key_from_time(s)]
-            rows.append((fid, d, json.dumps(arr, ensure_ascii=False), ts))
+            rows.append((fid, d, json.dumps(arr, ensure_ascii=False), row_ts))
 
     if not rows:
         return

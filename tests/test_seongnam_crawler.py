@@ -123,6 +123,10 @@ class SeongnamCrawlerTests(unittest.TestCase):
         self.assertTrue(result["partial_failure"])
         self.assertEqual("network_capture_failed", result["android_status"])
 
+    @patch.dict("os.environ", {"SEONGNAM_ANDROID_TIMEOUT_MS": "600000"}, clear=False)
+    def test_android_collector_timeout_tracks_android_deadline(self):
+        self.assertGreaterEqual(crawl_seongnam._android_collector_timeout(), 660)
+
     @patch.dict("os.environ", {"GITHUB_ACTIONS": "true"}, clear=False)
     @patch.object(crawl_seongnam, "_ensure_authenticated_session")
     def test_github_actions_auto_mode_does_not_touch_seongnam_site(self, auth):

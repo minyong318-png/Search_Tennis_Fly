@@ -9,29 +9,40 @@ concurrency:
 
 jobs:
   run:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
+    runs-on: [self-hosted, Windows, X64, tennis-local]
+    timeout-minutes: 20
 
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-          cache: "pip"
-
       - name: Install deps
+        shell: powershell
         run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          $python = "$env:LOCALAPPDATA\Programs\Python\Python311\python.exe"
+          if (-not (Test-Path $python)) {
+            $python = "python"
+          }
+          & $python --version
+          & $python -m pip install --upgrade pip
+          & $python -m pip install -r requirements.txt
 
-      - name: Run refresh (Seongnam)
+      - name: Run Android Chrome refresh (Seongnam, 8 days)
+        shell: powershell
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
-          RUN_TARGET: "seongnam"
-          SEONGNAM_COLLECTOR_MODE: "auto"
+          SEONGNAM_DAYS_AHEAD: "7"
+          SEONGNAM_ANDROID_TIMEOUT_MS: "600000"
+          SEONGNAM_ANDROID_RUN_TIMEOUT: "900"
+          SEONGNAM_ANDROID_FETCH_TIMEOUT_MS: "10000"
+          SEONGNAM_ANDROID_CONCURRENCY: "16"
+          SEONGNAM_ANDROID_BATCH_SIZE: "120"
+          SEONGNAM_ANDROID_FETCH_RETRIES: "1"
           VAPID_PUBLIC_KEY: ${{ secrets.VAPID_PUBLIC_KEY }}
           VAPID_PRIVATE_KEY: ${{ secrets.VAPID_PRIVATE_KEY }}
           VAPID_SUBJECT: ${{ secrets.VAPID_SUBJECT }}
         run: |
-          python refresh_and_notify.py
+          $python = "$env:LOCALAPPDATA\Programs\Python\Python311\python.exe"
+          if (-not (Test-Path $python)) {
+            $python = "python"
+          }
+          .\scripts\run_seongnam_android.ps1 -Python $python
