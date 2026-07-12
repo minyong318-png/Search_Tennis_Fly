@@ -340,6 +340,10 @@ function jsString(value) {
   return JSON.stringify(String(value || ""));
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 async function pageFetchText(cdp, url, options = {}) {
   const timeoutMs = numberEnv(
     "SEONGNAM_ANDROID_FETCH_TIMEOUT_MS",
@@ -365,6 +369,8 @@ async function pageFetchText(cdp, url, options = {}) {
         const res = await fetch(${jsString(url)}, opts);
         const text = await res.text();
         return { ok: res.ok, status: res.status, url: res.url, contentType: res.headers.get('content-type') || '', text };
+      } catch (error) {
+        return { ok: false, status: 0, url: ${jsString(url)}, contentType: '', text: '', fetchError: String(error && error.message || error) };
       } finally {
         clearTimeout(timer);
       }
@@ -377,23 +383,48 @@ async function collectWithPageFetch(cdp, diagnostics) {
   const availabilityById = new Map();
   const daysAhead = Math.max(0, Math.min(Number(process.env.SEONGNAM_DAYS_AHEAD || 7), 45));
   const maxCourts = numberEnv("SEONGNAM_ANDROID_MAX_COURTS", 0, 0, 500);
+  const requestDelayMs = numberEnv("SEONGNAM_ANDROID_REQUEST_DELAY_MS", 100, 0, 5000);
   const deadlineMs = Date.now() + numberEnv(
     "SEONGNAM_ANDROID_TIMEOUT_MS",
     DEFAULT_ANDROID_TIMEOUT_MS,
     10000,
     900000
   );
-  const assertDeadline = () => {
-    if (Date.now() > deadlineMs) throw new Error("collection_deadline_exceeded");
+  const maxDiagnosticResponses = numberEnv("SEONGNAM_ANDROID_MAX_DIAGNOSTIC_RESPONSES", 200, 0, 1000);
+  const deadlineExceeded = () => Date.now() > deadlineMs;
+  const markDeadline = () => {
+    diagnostics.deadline_exceeded = true;
   };
-  assertDeadline();
+  const recordResponse = (response, context = {}) => {
+    diagnostics.response_count = (diagnostics.response_count || 0) + 1;
+    if (!maxDiagnosticResponses || diagnostics.responses.length < maxDiagnosticResponses) {
+      diagnostics.responses.push({
+        url: response?.url,
+        status: response?.status,
+        contentType: response?.contentType,
+        ...context,
+      });
+    }
+    if (response?.fetchError) {
+      diagnostics.response_errors ||= [];
+      diagnostics.response_errors.push({
+        url: response.url,
+        error: response.fetchError,
+        ...context,
+      });
+    }
+  };
   const list = await pageFetchText(cdp, LIST_URL, { headers: { Accept: "text/html,*/*" } });
-  diagnostics.responses.push({ url: list.url, status: list.status, contentType: list.contentType });
+  recordResponse(list, { kind: "facility_list" });
+  if (list.fetchError) throw new Error(`facility_list_fetch_${list.fetchError}`);
   if (!list.ok) throw new Error(`facility_list_http_${list.status}`);
   const groups = parseFacilityListHtml(list.text);
   diagnostics.groups = groups.length;
   for (const group of groups) {
-    assertDeadline();
+    if (deadlineExceeded()) {
+      markDeadline();
+      break;
+    }
     if (maxCourts && facilitiesById.size >= maxCourts) break;
     const body = new URLSearchParams({ groupId: group.groupId }).toString();
     const response = await pageFetchText(cdp, `${BASE_URL}/tennisList.do`, {
@@ -401,8 +432,9 @@ async function collectWithPageFetch(cdp, diagnostics) {
       headers: { "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8", Accept: "text/html,*/*" },
       body,
     });
-    diagnostics.responses.push({ url: response.url, status: response.status, contentType: response.contentType });
-    if (!response.ok) continue;
+    recordResponse(response, { kind: "court_group", groupId: group.groupId });
+    if (requestDelayMs) await sleep(requestDelayMs);
+    if (response.fetchError || !response.ok) continue;
     for (const court of parseGroupHtml(response.text, group.title)) {
       if (maxCourts && facilitiesById.size >= maxCourts) break;
       facilitiesById.set(court.facId, {
@@ -413,10 +445,16 @@ async function collectWithPageFetch(cdp, diagnostics) {
   }
   diagnostics.courts = facilitiesById.size;
   for (const facId of facilitiesById.keys()) {
-    assertDeadline();
+    if (deadlineExceeded()) {
+      markDeadline();
+      break;
+    }
     const daymap = availabilityById.get(facId) || {};
     for (let offset = 0; offset <= daysAhead; offset += 1) {
-      assertDeadline();
+      if (deadlineExceeded()) {
+        markDeadline();
+        break;
+      }
       const date = ymd(offset);
       daymap[date] = [];
       const status = await pageFetchText(
@@ -424,15 +462,18 @@ async function collectWithPageFetch(cdp, diagnostics) {
         `${BASE_URL}/getReservationInfoByDate.do?facId=${encodeURIComponent(facId)}&resdate=${encodeURIComponent(ymdDash(date))}`,
         { headers: { Accept: "text/plain,*/*" } }
       );
-      diagnostics.responses.push({ url: status.url, status: status.status, contentType: status.contentType });
+      recordResponse(status, { kind: "date_status", facId, date });
+      if (requestDelayMs) await sleep(requestDelayMs);
+      if (status.fetchError || !status.ok) continue;
       if (["closed", "empty", "full"].includes(String(status.text || "").trim().toLowerCase())) continue;
       const table = await pageFetchText(cdp, `${BASE_URL}/getTimeTableByDate.do`, {
         method: "POST",
         headers: { "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8", Accept: "text/html,*/*" },
         body: new URLSearchParams({ facId, resdate: ymdDash(date) }).toString(),
       });
-      diagnostics.responses.push({ url: table.url, status: table.status, contentType: table.contentType });
-      if (!table.ok) continue;
+      recordResponse(table, { kind: "time_table", facId, date });
+      if (requestDelayMs) await sleep(requestDelayMs);
+      if (table.fetchError || !table.ok) continue;
       daymap[date] = parseTimetableHtml(table.text).map((slot) => ({
         ...slot,
         courtName: facilitiesById.get(facId)?.title || facId,
