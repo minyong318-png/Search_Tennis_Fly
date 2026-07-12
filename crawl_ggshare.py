@@ -140,9 +140,11 @@ def _crawl_browser(target_city: str = "") -> Dict[str, Any]:
 
 def crawl_ggshare(target_city: str = "") -> Dict[str, Any]:
     selected_city = (target_city or "").strip().lower()
+    browser_error = ""
     try:
         return _crawl_browser(selected_city)
     except Exception as exc:
+        browser_error = str(exc)
         print(f"[GGSHARE_BROWSER][WARN] fallback to metadata-only crawl: {exc}")
 
     items = [item for item in FACILITIES if not selected_city or item["city"] == selected_city]
@@ -178,7 +180,13 @@ def crawl_ggshare(target_city: str = "") -> Dict[str, Any]:
 
     label = selected_city or "all"
     print(f"[GGSHARE][STATS] target={label} total={stats['total']} ok={stats['ok']} fail={stats['fail']}")
-    return {"facilities": facilities, "availability": availability}
+    return {
+        "facilities": facilities,
+        "availability": availability,
+        "automation_blocked": True,
+        "error_type": "AutomationBlocked",
+        "error_message": browser_error,
+    }
 
 
 if __name__ == "__main__":

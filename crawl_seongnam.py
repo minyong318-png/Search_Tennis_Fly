@@ -233,6 +233,16 @@ def crawl_seongnam() -> Dict[str, Any]:
             fail += 1
             print(f"[SEONGNAM][WARN] group={group_id} error={exc}")
 
+    if group_ids and not facilities and fail == len(group_ids):
+        print("[SEONGNAM][AUTH] all facility group requests rejected")
+        return {
+            "facilities": {},
+            "availability": {},
+            "login_required": True,
+            "error_type": "AuthenticationRequired",
+            "error_message": "all facility group requests were rejected",
+        }
+
     if not login_required:
         days_ahead = _days_ahead()
         max_workers = min(_max_workers(), max(1, len(facilities)))

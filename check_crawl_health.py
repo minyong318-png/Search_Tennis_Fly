@@ -23,6 +23,9 @@ CITY_CONFIG = {
     "hanam": {"label": "하남", "min_facilities": 1, "max_age_hours": 30},
     "uiwang": {"label": "의왕", "min_facilities": 1, "max_age_hours": 30},
     "incheon": {"label": "인천", "min_facilities": 1, "max_age_hours": 30},
+    "anseong": {"label": "안성", "min_facilities": 1, "max_age_hours": 30},
+    "uijeongbu": {"label": "의정부", "min_facilities": 1, "max_age_hours": 30},
+    "yangpyeong": {"label": "양평", "min_facilities": 1, "max_age_hours": 30},
 }
 
 

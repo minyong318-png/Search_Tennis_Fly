@@ -18,13 +18,16 @@ import crawl_anyang
 import crawl_paju
 import crawl_ggshare
 import crawl_extra_cities
+from crawler_diagnostics import run_crawler
+
+LAST_FAILED_PREFIXES: Set[str] = set()
 
 
 # =========================================================
 # Utils
 # =========================================================
 def utcnow() -> datetime:
-    return datetime.utcnow()
+    return datetime.now(timezone.utc)
 
 
 KST = timezone(timedelta(hours=9))
@@ -290,6 +293,13 @@ def _ns_paju_id(key: str) -> str:
 def _ns_ggshare_id(key: str) -> str:
     return f"ggshare:{key}"
 
+def _ns_ggshare_city_id(city: str, key: str) -> str:
+    raw = str(key)
+    city_prefix = f"{city}-"
+    if raw.startswith(city_prefix):
+        raw = raw[len(city_prefix):]
+    return f"{city}:{raw}"
+
 
 def _ns_hanam_id(key: str) -> str:
     return f"hanam:{key}"
@@ -381,6 +391,7 @@ def crawl_all() -> Tuple[Dict[str, Any], Dict[str, Dict[str, List[Any]]]]:
       - yongin / goyang / suwon / seongnam / anyang / paju / hanam / uiwang / incheon / all
     """
     target = (os.getenv("RUN_TARGET") or "all").strip().lower()
+    LAST_FAILED_PREFIXES.clear()
 
     facilities: Dict[str, Any] = {}
     availability: Dict[str, Dict[str, List[Any]]] = {}
@@ -391,7 +402,13 @@ def crawl_all() -> Tuple[Dict[str, Any], Dict[str, Dict[str, List[Any]]]]:
     if target in ("all", "yongin"):
         set_crawl_exit_node("YONGIN", True)
         try:
-            y_fac, y_av = tennis_core.run_all()
+            y_out = run_crawler(
+                "yongin",
+                "publicsports",
+                tennis_core.BASE_URL,
+                lambda: dict(zip(("facilities", "availability"), tennis_core.run_all())),
+            )
+            y_fac, y_av = y_out.get("facilities", {}), y_out.get("availability", {})
         finally:
             set_crawl_exit_node("YONGIN", False)
 
@@ -413,7 +430,7 @@ def crawl_all() -> Tuple[Dict[str, Any], Dict[str, Dict[str, List[Any]]]]:
         started = time.perf_counter()
         set_crawl_exit_node("GYT", True)
         try:
-            out_g1 = crawl_goyang.crawl_gytennis()
+            out_g1 = run_crawler("goyang", "gytennis", "https://www.gytennis.or.kr/", crawl_goyang.crawl_gytennis)
         finally:
             set_crawl_exit_node("GYT", False)
         print(f"[GYT][ELAPSED] seconds={time.perf_counter() - started:.2f}")
@@ -421,7 +438,7 @@ def crawl_all() -> Tuple[Dict[str, Any], Dict[str, Dict[str, List[Any]]]]:
         # ✅ daehwa는 로그인정보 없으면 스킵(실패로 전체 종료 방지)
         try:
             started = time.perf_counter()
-            out_g2 = crawl_goyang.crawl_daehwa()
+            out_g2 = run_crawler("goyang", "daehwa", "https://daehwa.gys.or.kr:451/rent/tennis_rent.php", crawl_goyang.crawl_daehwa)
             print(f"[DAEHWA][ELAPSED] seconds={time.perf_counter() - started:.2f}")
         except Exception as e:
             print("[DAEHWA] skipped:", e)
@@ -429,7 +446,7 @@ def crawl_all() -> Tuple[Dict[str, Any], Dict[str, Dict[str, List[Any]]]]:
 
         try:
             started = time.perf_counter()
-            out_g3 = crawl_goyang.crawl_baekseok()
+            out_g3 = run_crawler("goyang", "baekseok", "https://gbc.gys.or.kr:446/rent/tennis_rent.php?part_opt=07", crawl_goyang.crawl_baekseok)
             print(f"[BAEKSEOK][ELAPSED] seconds={time.perf_counter() - started:.2f}")
         except Exception as e:
             print("[BAEKSEOK] skipped:", e)
@@ -616,7 +633,7 @@ def crawl_all() -> Tuple[Dict[str, Any], Dict[str, Dict[str, List[Any]]]]:
     if target in ("all", "suwon"):
         set_crawl_exit_node("SUWON", True)
         try:
-            out_s = crawl_suwon.crawl_suwon()
+            out_s = run_crawler("suwon", "mpsports", crawl_suwon.CALENDAR_URL, crawl_suwon.crawl_suwon)
         finally:
             set_crawl_exit_node("SUWON", False)
         for raw_fid, meta in (out_s.get("facilities") or {}).items():
@@ -630,7 +647,7 @@ def crawl_all() -> Tuple[Dict[str, Any], Dict[str, Dict[str, List[Any]]]]:
     if target in ("all", "seongnam"):
         set_crawl_exit_node("SEONGNAM", True)
         try:
-            out_sn = crawl_seongnam.crawl_seongnam()
+            out_sn = run_crawler("seongnam", "isdc", crawl_seongnam.LIST_URL, crawl_seongnam.crawl_seongnam)
         finally:
             set_crawl_exit_node("SEONGNAM", False)
         for raw_fid, meta in (out_sn.get("facilities") or {}).items():
@@ -644,7 +661,7 @@ def crawl_all() -> Tuple[Dict[str, Any], Dict[str, Dict[str, List[Any]]]]:
     if target in ("all", "anyang"):
         set_crawl_exit_node("ANYANG", True)
         try:
-            out_ay = crawl_anyang.crawl_anyang()
+            out_ay = run_crawler("anyang", "aytennis", crawl_anyang.BASE_URL, crawl_anyang.crawl_anyang)
         finally:
             set_crawl_exit_node("ANYANG", False)
         for raw_fid, meta in (out_ay.get("facilities") or {}).items():
@@ -658,7 +675,7 @@ def crawl_all() -> Tuple[Dict[str, Any], Dict[str, Dict[str, List[Any]]]]:
     if target in ("all", "paju"):
         set_crawl_exit_node("PAJU", True)
         try:
-            out_pj = crawl_paju.crawl_paju()
+            out_pj = run_crawler("paju", "pjtennis", crawl_paju.BASE_URL, crawl_paju.crawl_paju)
         finally:
             set_crawl_exit_node("PAJU", False)
         for raw_fid, meta in (out_pj.get("facilities") or {}).items():
@@ -667,24 +684,43 @@ def crawl_all() -> Tuple[Dict[str, Any], Dict[str, Dict[str, List[Any]]]]:
             availability[_ns_paju_id(str(raw_fid))] = daymap or {}
 
     # -----------------------------
+    # (G) 경기공유서비스: 안성/의정부/양평
+    # -----------------------------
+    for gg_city in ("anseong", "uijeongbu", "yangpyeong"):
+        if target not in ("all", gg_city):
+            continue
+        out_gg = run_crawler(
+            gg_city,
+            "ggshare",
+            crawl_ggshare.BASE_URL,
+            lambda city=gg_city: crawl_ggshare.crawl_ggshare(city),
+        )
+        if out_gg.get("diagnostic", {}).get("status") not in {"normal", "no_reservations"}:
+            LAST_FAILED_PREFIXES.add(f"{gg_city}:")
+        for raw_fid, meta in (out_gg.get("facilities") or {}).items():
+            facilities[_ns_ggshare_city_id(gg_city, str(raw_fid))] = meta
+        for raw_fid, daymap in (out_gg.get("availability") or {}).items():
+            availability[_ns_ggshare_city_id(gg_city, str(raw_fid))] = daymap or {}
+
+    # -----------------------------
     # (H) Extra city sources
     # -----------------------------
     if target in ("all", "hanam"):
-        out_hn = crawl_extra_cities.crawl_hanam()
+        out_hn = run_crawler("hanam", "hanam", crawl_extra_cities.HANAM_BASE, crawl_extra_cities.crawl_hanam)
         for raw_fid, meta in (out_hn.get("facilities") or {}).items():
             facilities[_ns_hanam_id(str(raw_fid))] = meta
         for raw_fid, daymap in (out_hn.get("availability") or {}).items():
             availability[_ns_hanam_id(str(raw_fid))] = daymap or {}
 
     if target in ("all", "uiwang"):
-        out_uw = crawl_extra_cities.crawl_uiwang()
+        out_uw = run_crawler("uiwang", "uiwang", crawl_extra_cities.UIWANG_BASE, crawl_extra_cities.crawl_uiwang)
         for raw_fid, meta in (out_uw.get("facilities") or {}).items():
             facilities[_ns_uiwang_id(str(raw_fid))] = meta
         for raw_fid, daymap in (out_uw.get("availability") or {}).items():
             availability[_ns_uiwang_id(str(raw_fid))] = daymap or {}
 
     if target in ("all", "incheon"):
-        out_ic = crawl_extra_cities.crawl_incheon()
+        out_ic = run_crawler("incheon", "incheon", crawl_extra_cities.JMPSS_BASE, crawl_extra_cities.crawl_incheon)
         for raw_fid, meta in (out_ic.get("facilities") or {}).items():
             facilities[_ns_incheon_id(str(raw_fid))] = meta
         for raw_fid, daymap in (out_ic.get("availability") or {}).items():
@@ -694,7 +730,7 @@ def crawl_all() -> Tuple[Dict[str, Any], Dict[str, Dict[str, List[Any]]]]:
 # =========================================================
 # DB write: facilities / availability_cache (프론트용)
 # =========================================================
-def upsert_facilities_for_frontend(conn: psycopg.Connection, facilities: Dict[str, Any]) -> None:
+def upsert_facilities_for_frontend(conn: psycopg.Connection, facilities: Dict[str, Any], commit: bool = True) -> None:
     ts = utcnow()
     rows = []
     for fid, v in facilities.items():
@@ -720,12 +756,14 @@ def upsert_facilities_for_frontend(conn: psycopg.Connection, facilities: Dict[st
             """,
             rows,
         )
-    conn.commit()
+    if commit:
+        conn.commit()
 
 def prune_stale_yongin_facilities(
     conn: psycopg.Connection,
     current_facility_ids: Iterable[str],
     min_current_count: int = 30,
+    commit: bool = True,
 ) -> Tuple[int, int]:
     """
     Keep only Yongin facilities present in the latest Yongin facility list.
@@ -766,7 +804,8 @@ def prune_stale_yongin_facilities(
         )
         deleted_facilities = cur.rowcount
 
-    conn.commit()
+    if commit:
+        conn.commit()
     print(
         "[YONGIN][PRUNE] "
         f"keep={len(keep_ids)} deleted_facilities={deleted_facilities} "
@@ -780,6 +819,7 @@ def prune_stale_prefix_facilities(
     prefix: str,
     current_facility_ids: Iterable[str],
     min_current_count: int = 1,
+    commit: bool = True,
 ) -> Tuple[int, int]:
     keep_ids = sorted({str(fid) for fid in current_facility_ids if str(fid).startswith(prefix)})
     if len(keep_ids) < min_current_count:
@@ -799,9 +839,23 @@ def prune_stale_prefix_facilities(
             (f"{prefix}%", keep_ids),
         )
         deleted_facilities = cur.rowcount or 0
-    conn.commit()
+    if commit:
+        conn.commit()
     print(f"[PRUNE] prefix={prefix} keep={len(keep_ids)} deleted_facilities={deleted_facilities} deleted_cache={deleted_cache}")
     return deleted_facilities, deleted_cache
+
+def delete_expired_availability_cache(conn: psycopg.Connection, commit: bool = True) -> int:
+    with conn.cursor() as cur:
+        cur.execute(
+            "delete from public.availability_cache where date_ymd < %s",
+            (yyyymmdd_to_date(kst_today_yyyymmdd()),),
+        )
+        deleted = cur.rowcount or 0
+    if commit:
+        conn.commit()
+    if deleted:
+        print(f"[CACHE] expired rows deleted={deleted}")
+    return deleted
 
 def clear_availability_cache_for_target(
     conn: psycopg.Connection,
@@ -810,6 +864,7 @@ def clear_availability_cache_for_target(
     end_yyyymmdd: str,
     keep_yongin_today: bool = False,
     exclude_prefixes: Iterable[str] = (),
+    commit: bool = True,
 ) -> None:
     """
     타겟별로 해당 기간의 availability_cache를 빈 배열로 초기화한다.
@@ -837,6 +892,12 @@ def clear_availability_cache_for_target(
         prefixes.append("uiwang:%")
     if target in ("all", "incheon"):
         prefixes.append("incheon:%")
+    if target in ("all", "anseong"):
+        prefixes.append("anseong:%")
+    if target in ("all", "uijeongbu"):
+        prefixes.append("uijeongbu:%")
+    if target in ("all", "yangpyeong"):
+        prefixes.append("yangpyeong:%")
 
     excluded = tuple(str(prefix) for prefix in exclude_prefixes if prefix)
     prefixes = [prefix for prefix in prefixes if not any(prefix.startswith(skip) for skip in excluded)]
@@ -871,13 +932,15 @@ def clear_availability_cache_for_target(
             """,
             tuple(params),
         )
-    conn.commit()
+    if commit:
+        conn.commit()
 
 def upsert_availability_cache_for_frontend(
     conn: psycopg.Connection,
     facilities: Dict[str, Any],
     availability: Dict[str, Dict[str, List[Any]]],
     keep_yongin_today: bool = False,
+    commit: bool = True,
 ) -> None:
     """
     availability_cache는 프론트가 /api/data 대신 읽는 용도.
@@ -919,7 +982,8 @@ def upsert_availability_cache_for_frontend(
             """,
             rows,
         )
-    conn.commit()
+    if commit:
+        conn.commit()
 
 
 
@@ -1253,6 +1317,16 @@ def main() -> None:
         excluded_cache_prefixes.append("anyang:")
     if protect_paju_cache:
         excluded_cache_prefixes.append("paju:")
+    excluded_cache_prefixes.extend(sorted(LAST_FAILED_PREFIXES))
+    if LAST_FAILED_PREFIXES:
+        facilities_for_write = {
+            k: v for k, v in facilities_for_write.items()
+            if not any(str(k).startswith(prefix) for prefix in LAST_FAILED_PREFIXES)
+        }
+        availability_for_write = {
+            k: v for k, v in availability_for_write.items()
+            if not any(str(k).startswith(prefix) for prefix in LAST_FAILED_PREFIXES)
+        }
     with psycopg.connect(database_url) as conn:
         # Frontend tables and alarm housekeeping are DB work, so run them after crawling.
         ensure_extra_schema(conn)
@@ -1271,28 +1345,33 @@ def main() -> None:
                 end_ymd,
                 keep_yongin_today=(clear_target in ("all", "yongin")),
                 exclude_prefixes=excluded_cache_prefixes,
+                commit=False,
             )
         else:
             print("[CACHE] skip clear: no dates in availability")
 
         # 2) 프론트용 저장 (시설/availability_cache)
         try:
-            upsert_facilities_for_frontend(conn, facilities_for_write)
+            delete_expired_availability_cache(conn, commit=False)
+            upsert_facilities_for_frontend(conn, facilities_for_write, commit=False)
             if clear_target in ("all", "yongin"):
-                prune_stale_yongin_facilities(conn, facilities_for_write.keys())
+                prune_stale_yongin_facilities(conn, facilities_for_write.keys(), commit=False)
             if clear_target in ("all", "hanam"):
-                prune_stale_prefix_facilities(conn, "hanam:", facilities_for_write.keys())
+                prune_stale_prefix_facilities(conn, "hanam:", facilities_for_write.keys(), commit=False)
             if clear_target in ("all", "uiwang"):
-                prune_stale_prefix_facilities(conn, "uiwang:", facilities_for_write.keys())
+                prune_stale_prefix_facilities(conn, "uiwang:", facilities_for_write.keys(), commit=False)
             if clear_target in ("all", "incheon"):
-                prune_stale_prefix_facilities(conn, "incheon:", facilities_for_write.keys())
+                prune_stale_prefix_facilities(conn, "incheon:", facilities_for_write.keys(), commit=False)
             upsert_availability_cache_for_frontend(
                 conn,
                 facilities_for_write,
                 availability_for_write,
                 keep_yongin_today=(clear_target in ("all", "yongin")),
+                commit=False,
             )
+            conn.commit()
         except Exception as e:
+            conn.rollback()
             # 프론트용 저장이 실패해도 알림은 계속 수행할 수 있게 한다
             print(f"[WARN] frontend cache save failed: {e}")
 

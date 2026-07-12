@@ -167,6 +167,8 @@ def _fetch_hanam_day(court_code: str, court_no: str, day: date) -> tuple[str, Di
         f"&searchCategoryCode=B1&searchResveDate={ymd}"
     )
     response = session.get(url, timeout=_timeout())
+    if response.status_code == 404:
+        response = session.get(url, timeout=_timeout())
     response.raise_for_status()
     return court_code, _parse_hanam_day(_text(response), url, court_no)
 
@@ -212,13 +214,20 @@ def _fetch_hanam_sports_day(place_code: str, day: date) -> tuple[str, Dict[str, 
     session = _session()
     ymd = day.strftime("%Y%m%d")
     reserve_url = f"{HANAM_SPORTS_BASE}/?place_code={place_code}"
-    session.get(reserve_url, timeout=_timeout()).raise_for_status()
+    landing = session.get(reserve_url, timeout=_timeout())
+    landing.raise_for_status()
+    open_day_match = re.search(
+        r'id=["\']Rent_Open_Start_Day["\'][^>]*value=["\'](\d+)["\']',
+        _text(landing),
+        re.I,
+    )
+    rent_open_start_day = open_day_match.group(1) if open_day_match else "15"
     response = session.post(
         f"{HANAM_SPORTS_BASE}/center/ajax.day.rent.list.php",
         data={
             "center_id": "01",
             "rdate": ymd,
-            "rent_open_start_day": "10",
+            "rent_open_start_day": rent_open_start_day,
             "place_code": place_code,
             "Rstep": "",
         },
@@ -302,7 +311,19 @@ def crawl_hanam() -> Dict[str, Any]:
         f"misa_ok={stats['ok']} misa_fail={stats['fail']} "
         f"sports_ok={sports_stats['ok']} sports_fail={sports_stats['fail']}"
     )
-    return {"facilities": facilities, "availability": availability}
+    partial_failure = stats["fail"] > 0 or sports_stats["fail"] > 0
+    error_message = ""
+    if sports_stats["fail"]:
+        error_message = f"sports source failed {sports_stats['fail']} requests"
+    elif stats["fail"]:
+        error_message = f"misa source failed {stats['fail']} requests"
+    return {
+        "facilities": facilities,
+        "availability": availability,
+        "partial_failure": partial_failure,
+        "error_type": "UpstreamRejected" if partial_failure else "",
+        "error_message": error_message,
+    }
 
 
 def crawl_uiwang() -> Dict[str, Any]:

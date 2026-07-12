@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 import calendar
 import os
 import urllib3
+from urllib.parse import urljoin
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -119,9 +120,16 @@ def parse_facility_html(html):
 
         title = title_div.get_text(strip=True)
 
-        results[rid] = {"title": title, "location": location}
+        results[rid] = {"title": title, "location": location, "reserveUrl": urljoin(BASE_URL, href)}
 
     return results
+
+
+def attach_reserve_url(daymap, reserve_url):
+    for slots in (daymap or {}).values():
+        for slot in slots or []:
+            if isinstance(slot, dict):
+                slot.setdefault("reserveUrl", reserve_url)
 
 
 # --------------------------------------------------------------
@@ -301,6 +309,7 @@ async def run_all_async():
                 continue
             clean_data = {k: v for k, v in data.items() if k != "_failed_dates"}
             if clean_data:
+                attach_reserve_url(clean_data, facilities[rid].get("reserveUrl", BASE_URL))
                 availability[rid] = clean_data
 
         print(

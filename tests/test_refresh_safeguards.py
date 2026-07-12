@@ -1,11 +1,33 @@
 import os
 import sys
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 
 class RefreshSafeguardTests(unittest.TestCase):
+    def test_registered_ggshare_city_target_is_executed_and_namespaced(self):
+        import refresh_and_notify
+
+        payload = {
+            "facilities": {"anseong-F0137-1230001": {"title": "고삼"}},
+            "availability": {"anseong-F0137-1230001": {"20260712": []}},
+        }
+        with patch.dict(os.environ, {"RUN_TARGET": "anseong"}), patch.object(
+            refresh_and_notify.crawl_ggshare, "crawl_ggshare", return_value=payload
+        ) as crawl:
+            facilities, availability = refresh_and_notify.crawl_all()
+
+        crawl.assert_called_once_with("anseong")
+        self.assertIn("anseong:F0137-1230001", facilities)
+        self.assertIn("anseong:F0137-1230001", availability)
+
+        from check_crawl_health import CITY_CONFIG
+        self.assertIn("anseong", CITY_CONFIG)
+        self.assertIn("uijeongbu", CITY_CONFIG)
+        self.assertIn("yangpyeong", CITY_CONFIG)
+
     def test_zero_slots_can_clear_cache_when_crawl_completed(self):
         from refresh_and_notify import should_protect_cache
 
