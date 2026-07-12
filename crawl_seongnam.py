@@ -339,6 +339,17 @@ def crawl_seongnam() -> Dict[str, Any]:
         print("[SEONGNAM][STATS] total=0 ok=0 empty=0 fail=1 courts=0 slots=0 login_required=1")
         return {"facilities": {}, "availability": {}, "login_required": True}
 
+    if _last_auth_error_type == "AutomationBlocked":
+        print("[SEONGNAM][AUTH] automation blocked; skip facility group requests")
+        return {
+            "facilities": {},
+            "availability": {},
+            "login_required": True,
+            "automation_blocked": True,
+            "error_type": "AutomationBlocked",
+            "error_message": "automation blocked before facility group requests",
+        }
+
     for group_id in group_ids:
         try:
             response = session.post(f"{BASE_URL}/tennisList.do", data={"groupId": group_id}, timeout=_request_timeout())
