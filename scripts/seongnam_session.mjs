@@ -37,6 +37,7 @@ async function waitForChallenge(page) {
 }
 
 async function fillLoginForm(page) {
+  await assertNotAutomationBlocked(page);
   const idSelectors = [
     "input[name='web_id']",
     "#web_id",
@@ -69,6 +70,13 @@ async function fillLoginForm(page) {
     else if (typeof window.login === "function") window.login();
     else document.querySelector("form")?.submit();
   });
+}
+
+async function assertNotAutomationBlocked(page) {
+  const body = await page.locator("body").innerText().catch(() => "");
+  if (page.url().includes("auto_detect.do") || /비정상 접근 탐지|abnormal access|automation/i.test(body)) {
+    throw new Error(`automation blocked at ${page.url()}`);
+  }
 }
 
 async function firstVisible(page, selectors) {
@@ -121,6 +129,7 @@ async function main() {
     await page.waitForLoadState("networkidle", { timeout: 30000 }).catch(() => {});
     await page.goto(LIST_URL, { waitUntil: "domcontentloaded", timeout: 90000 });
     await waitForChallenge(page);
+    await assertNotAutomationBlocked(page);
     await validateWithRequestContext(context);
     await context.storageState({ path: STORAGE_STATE });
     console.log(`[SEONGNAM][AUTH] playwright storage_state=saved path=${STORAGE_STATE}`);

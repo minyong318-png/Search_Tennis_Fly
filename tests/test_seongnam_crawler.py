@@ -112,6 +112,28 @@ class SeongnamCrawlerTests(unittest.TestCase):
         self.assertTrue(result["login_required"])
         self.assertEqual("all facility group requests were rejected", result["error_message"])
 
+    @patch.object(crawl_seongnam, "_ensure_authenticated_session", return_value=False)
+    @patch.object(crawl_seongnam, "_session")
+    def test_automation_blocked_auth_error_is_preserved(self, session_factory, _auth):
+        crawl_seongnam._last_auth_error_type = "AutomationBlocked"
+        session = Mock()
+        listing = Mock()
+        listing.text = '<input name="groupId" value="1"><div class="head-area">탄천</div>'
+        listing.raise_for_status.return_value = None
+        rejected = Mock()
+        rejected.raise_for_status.side_effect = requests.HTTPError("400 Client Error")
+        session.get.return_value = listing
+        session.post.return_value = rejected
+        session_factory.return_value = session
+
+        try:
+            result = crawl_seongnam.crawl_seongnam()
+        finally:
+            crawl_seongnam._last_auth_error_type = ""
+
+        self.assertTrue(result["automation_blocked"])
+        self.assertEqual("AutomationBlocked", result["error_type"])
+
 
 if __name__ == "__main__":
     unittest.main()

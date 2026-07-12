@@ -26,10 +26,10 @@ def _counts(result: Dict[str, Any]) -> tuple[int, int, int, int]:
 
 
 def _status(result: Dict[str, Any], facilities: int, dates: int, slots: int) -> str:
-    if result.get("login_required"):
-        return "authentication_required"
     if result.get("automation_blocked"):
         return "automation_blocked"
+    if result.get("login_required"):
+        return "authentication_required"
     if result.get("partial_failure"):
         return "partial_failure"
     if facilities == 0 or dates == 0:

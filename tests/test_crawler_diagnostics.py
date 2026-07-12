@@ -94,6 +94,23 @@ class CrawlerDiagnosticsTests(unittest.TestCase):
         self.assertEqual("partial_failure", partial["diagnostic"]["status"])
         self.assertEqual("authentication_required", auth["diagnostic"]["status"])
 
+    def test_automation_blocked_takes_precedence_over_login_required(self):
+        result = run_crawler(
+            "seongnam",
+            "isdc",
+            "https://res.isdc.co.kr",
+            lambda: {
+                "facilities": {},
+                "availability": {},
+                "login_required": True,
+                "automation_blocked": True,
+                "error_type": "AutomationBlocked",
+            },
+        )
+
+        self.assertEqual("automation_blocked", result["diagnostic"]["status"])
+        self.assertEqual("AutomationBlocked", result["diagnostic"]["error_type"])
+
 
 if __name__ == "__main__":
     unittest.main()

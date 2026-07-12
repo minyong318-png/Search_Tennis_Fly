@@ -17,6 +17,7 @@ from urllib3.util.retry import Retry
 BASE_URL = "https://res.isdc.co.kr"
 LIST_URL = f"{BASE_URL}/facilityList.do?facType=29"
 _thread_local = threading.local()
+_last_auth_error_type = ""
 
 
 def _session() -> requests.Session:
@@ -146,6 +147,8 @@ def _validate_logged_in_session(session: requests.Session) -> bool:
 
 
 def _run_playwright_login() -> bool:
+    global _last_auth_error_type
+    _last_auth_error_type = ""
     script_path = os.path.join(os.path.dirname(__file__), "scripts", "seongnam_session.mjs")
     state_path = _storage_state_path()
     os.makedirs(os.path.dirname(state_path), exist_ok=True)
@@ -168,7 +171,10 @@ def _run_playwright_login() -> bool:
     if completed.stdout.strip():
         print(completed.stdout.strip())
     if completed.returncode != 0:
-        message = (completed.stderr or completed.stdout or "").strip().splitlines()[-1:]
+        output = (completed.stderr or completed.stdout or "").strip()
+        if "auto_detect.do" in output or "automation blocked" in output.lower():
+            _last_auth_error_type = "AutomationBlocked"
+        message = output.splitlines()[-1:]
         print(f"[SEONGNAM][AUTH] playwright login failed error={' '.join(message)}")
         return False
     return True
@@ -186,6 +192,9 @@ def _ensure_authenticated_session(session: requests.Session) -> bool:
         session.cookies.clear()
         if _apply_storage_state(session) and _validate_logged_in_session(session):
             return True
+
+    if _last_auth_error_type == "AutomationBlocked":
+        return False
 
     return _login(session)
 
@@ -358,11 +367,13 @@ def crawl_seongnam() -> Dict[str, Any]:
 
     if group_ids and not facilities and fail == len(group_ids):
         print("[SEONGNAM][AUTH] all facility group requests rejected")
+        automation_blocked = _last_auth_error_type == "AutomationBlocked"
         return {
             "facilities": {},
             "availability": {},
             "login_required": True,
-            "error_type": "AuthenticationRequired",
+            "automation_blocked": automation_blocked,
+            "error_type": "AutomationBlocked" if automation_blocked else "AuthenticationRequired",
             "error_message": "all facility group requests were rejected",
         }
 
