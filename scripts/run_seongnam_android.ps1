@@ -1,0 +1,48 @@
+param(
+  [string]$Python = "python",
+  [int]$Port = 9222
+)
+
+$ErrorActionPreference = "Stop"
+$root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
+$lockDir = Join-Path $root ".cache"
+$lockPath = Join-Path $lockDir "seongnam_android.lock"
+New-Item -ItemType Directory -Force -Path $lockDir | Out-Null
+
+$lockStream = $null
+try {
+  $lockStream = [System.IO.File]::Open($lockPath, [System.IO.FileMode]::OpenOrCreate, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
+} catch {
+  Write-Host "[SEONGNAM][ANDROID] another collector is already running"
+  exit 3
+}
+
+try {
+  Set-Location $root
+  if (-not (Get-Command adb -ErrorAction SilentlyContinue)) {
+    Write-Host "[SEONGNAM][ANDROID] adb not found; install Android platform-tools and add it to PATH"
+    exit 2
+  }
+
+  $devices = & adb devices
+  Write-Host ($devices -join "`n")
+  if (($devices -join "`n") -match "\tunauthorized") {
+    Write-Host "[SEONGNAM][ANDROID] allow the USB debugging prompt on the phone, then rerun"
+    exit 2
+  }
+  if (($devices -join "`n") -notmatch "\tdevice") {
+    Write-Host "[SEONGNAM][ANDROID] no online Android device"
+    exit 2
+  }
+
+  & adb forward "tcp:$Port" "localabstract:chrome_devtools_remote" | Out-Host
+  $env:RUN_TARGET = "seongnam"
+  $env:SEONGNAM_COLLECTOR_MODE = "android"
+  & $Python refresh_and_notify.py
+  exit $LASTEXITCODE
+} finally {
+  if ($lockStream) {
+    $lockStream.Close()
+    $lockStream.Dispose()
+  }
+}

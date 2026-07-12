@@ -26,6 +26,18 @@ def _counts(result: Dict[str, Any]) -> tuple[int, int, int, int]:
 
 
 def _status(result: Dict[str, Any], facilities: int, dates: int, slots: int) -> str:
+    android_status = str(result.get("android_status") or "")
+    if android_status in {
+        "login_required",
+        "automation_blocked",
+        "android_device_offline",
+        "android_unauthorized",
+        "android_cdp_unavailable",
+        "chrome_tab_not_found",
+        "network_capture_failed",
+        "parse_failed",
+    }:
+        return android_status
     if result.get("automation_blocked"):
         return "automation_blocked"
     if result.get("login_required"):

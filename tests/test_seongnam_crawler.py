@@ -78,6 +78,60 @@ class SeongnamCrawlerTests(unittest.TestCase):
 
         self.assertFalse(crawl_seongnam._has_login_challenge(html))
 
+    def test_android_collector_result_is_normalized_to_existing_schema(self):
+        payload = {
+            "status": "ok",
+            "facilities": [
+                {"id": "FAC001", "title": "탄천 1번 코트", "reserveUrl": crawl_seongnam.LIST_URL}
+            ],
+            "slots": [
+                {
+                    "facilityId": "FAC001",
+                    "date": "20260712",
+                    "timeContent": "09:00 ~ 10:00",
+                    "remaining": "2",
+                    "reserveUrl": crawl_seongnam.LIST_URL,
+                }
+            ],
+        }
+
+        result = crawl_seongnam._normalize_android_result(payload)
+
+        self.assertIn("FAC001", result["facilities"])
+        self.assertEqual("탄천 1번 코트", result["facilities"]["FAC001"]["title"])
+        self.assertEqual("09:00 ~ 10:00", result["availability"]["FAC001"]["20260712"][0]["timeContent"])
+        self.assertEqual("2", result["availability"]["FAC001"]["20260712"][0]["remaining"])
+
+    @patch.object(crawl_seongnam, "_run_android_collector", return_value={"status": "chrome_tab_not_found", "message": "missing"})
+    def test_android_mode_failure_preserves_cache(self, _collector):
+        result = crawl_seongnam.crawl_seongnam("android")
+
+        self.assertEqual({}, result["facilities"])
+        self.assertEqual({}, result["availability"])
+        self.assertEqual("ChromeTabNotFound", result["error_type"])
+        self.assertTrue(result["partial_failure"])
+
+    def test_android_zero_slots_is_not_treated_as_successful_no_reservations(self):
+        payload = {
+            "status": "ok",
+            "facilities": [{"id": "FAC001", "title": "탄천"}],
+            "slots": [],
+        }
+
+        result = crawl_seongnam._normalize_android_result(payload)
+
+        self.assertTrue(result["partial_failure"])
+        self.assertEqual("network_capture_failed", result["android_status"])
+
+    @patch.dict("os.environ", {"GITHUB_ACTIONS": "true"}, clear=False)
+    @patch.object(crawl_seongnam, "_ensure_authenticated_session")
+    def test_github_actions_auto_mode_does_not_touch_seongnam_site(self, auth):
+        result = crawl_seongnam.crawl_seongnam("auto")
+
+        auth.assert_not_called()
+        self.assertTrue(result["partial_failure"])
+        self.assertEqual("AutomationBlocked", result["error_type"])
+
     @patch.dict("os.environ", {"ISDC_ID": "", "ISDC_PW": ""})
     @patch.object(crawl_seongnam, "_login", return_value=False)
     @patch.object(crawl_seongnam, "_run_playwright_login")
@@ -107,7 +161,7 @@ class SeongnamCrawlerTests(unittest.TestCase):
         session.post.return_value = rejected
         session_factory.return_value = session
 
-        result = crawl_seongnam.crawl_seongnam()
+        result = crawl_seongnam.crawl_seongnam("playwright")
 
         self.assertTrue(result["login_required"])
         self.assertEqual("all facility group requests were rejected", result["error_message"])
@@ -124,7 +178,7 @@ class SeongnamCrawlerTests(unittest.TestCase):
         session_factory.return_value = session
 
         try:
-            result = crawl_seongnam.crawl_seongnam()
+            result = crawl_seongnam.crawl_seongnam("playwright")
         finally:
             crawl_seongnam._last_auth_error_type = ""
 

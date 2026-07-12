@@ -111,6 +111,22 @@ class CrawlerDiagnosticsTests(unittest.TestCase):
         self.assertEqual("automation_blocked", result["diagnostic"]["status"])
         self.assertEqual("AutomationBlocked", result["diagnostic"]["error_type"])
 
+    def test_android_failure_status_is_preserved(self):
+        result = run_crawler(
+            "seongnam",
+            "isdc",
+            "https://res.isdc.co.kr",
+            lambda: {
+                "facilities": {},
+                "availability": {},
+                "partial_failure": True,
+                "android_status": "chrome_tab_not_found",
+                "error_type": "ChromeTabNotFound",
+            },
+        )
+
+        self.assertEqual("chrome_tab_not_found", result["diagnostic"]["status"])
+
 
 if __name__ == "__main__":
     unittest.main()

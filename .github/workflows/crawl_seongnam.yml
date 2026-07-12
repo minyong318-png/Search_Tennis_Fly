@@ -15,12 +15,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Connect to Tailscale
-        uses: tailscale/github-action@v4
-        with:
-          authkey: ${{ secrets.TAILSCALE_AUTHKEY }}
-          ping: 100.120.193.30
-
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -30,25 +24,12 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          npm install --no-save playwright
-          npx playwright install chromium
-
-      - name: Restore Seongnam browser session
-        uses: actions/cache@v4
-        with:
-          path: .cache/seongnam_storage_state.json
-          key: seongnam-storage-state-${{ github.run_id }}
-          restore-keys: |
-            seongnam-storage-state-
 
       - name: Run refresh (Seongnam)
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           RUN_TARGET: "seongnam"
-          CRAWL_TAILSCALE_EXIT_NODE: "100.120.193.30"
-          SEONGNAM_STORAGE_STATE: ".cache/seongnam_storage_state.json"
-          ISDC_ID: ${{ secrets.ISDC_ID }}
-          ISDC_PW: ${{ secrets.ISDC_PW }}
+          SEONGNAM_COLLECTOR_MODE: "auto"
           VAPID_PUBLIC_KEY: ${{ secrets.VAPID_PUBLIC_KEY }}
           VAPID_PRIVATE_KEY: ${{ secrets.VAPID_PRIVATE_KEY }}
           VAPID_SUBJECT: ${{ secrets.VAPID_SUBJECT }}

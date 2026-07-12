@@ -3,6 +3,10 @@
 logs/
 debug/
 debug_latest_gytennis/
+android-device-state/
+seongnam-debug/
+*.storage_state.json
+*.har
 korea_gov_ca.pem
 __pycache__/
 *.pyc

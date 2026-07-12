@@ -1,3 +1,4 @@
+import argparse
 import json
 import os
 import re
@@ -18,6 +19,17 @@ BASE_URL = "https://res.isdc.co.kr"
 LIST_URL = f"{BASE_URL}/facilityList.do?facType=29"
 _thread_local = threading.local()
 _last_auth_error_type = ""
+
+ANDROID_FAILURE_ERROR_TYPES = {
+    "login_required": "LoginRequired",
+    "automation_blocked": "AutomationBlocked",
+    "android_device_offline": "AndroidDeviceOffline",
+    "android_unauthorized": "AndroidUnauthorized",
+    "android_cdp_unavailable": "AndroidCdpUnavailable",
+    "chrome_tab_not_found": "ChromeTabNotFound",
+    "network_capture_failed": "NetworkCaptureFailed",
+    "parse_failed": "ParseFailed",
+}
 
 
 def _session() -> requests.Session:
@@ -58,6 +70,11 @@ def _remove_file_quietly(path: str) -> None:
 
 def _has_credentials() -> bool:
     return bool((os.getenv("ISDC_ID") or "").strip() and (os.getenv("ISDC_PW") or ""))
+
+
+def _collector_mode(explicit: str | None = None) -> str:
+    raw = (explicit or os.getenv("SEONGNAM_COLLECTOR_MODE") or "auto").strip().lower()
+    return raw if raw in {"auto", "android", "playwright"} else "auto"
 
 
 def _clean_text(value: str) -> str:
@@ -199,6 +216,131 @@ def _ensure_authenticated_session(session: requests.Session) -> bool:
     return _login(session)
 
 
+def _run_android_collector() -> dict:
+    script_path = os.path.join(os.path.dirname(__file__), "scripts", "seongnam_android_collector.mjs")
+    try:
+        completed = subprocess.run(
+            ["node", script_path],
+            cwd=os.path.dirname(__file__),
+            env=os.environ.copy(),
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=int(max(45, min(_request_timeout() * 30, 240))),
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return {
+            "status": "android_cdp_unavailable",
+            "message": f"Android collector unavailable: {exc}",
+        }
+    try:
+        return json.loads((completed.stdout or "").strip())
+    except json.JSONDecodeError:
+        return {
+            "status": "android_cdp_unavailable",
+            "message": (completed.stderr or completed.stdout or "Android collector returned no JSON").strip()[-500:],
+        }
+
+
+def _android_error_result(payload: dict) -> Dict[str, Any]:
+    status = str(payload.get("status") or "parse_failed")
+    error_type = ANDROID_FAILURE_ERROR_TYPES.get(status, "ParseFailed")
+    return {
+        "facilities": {},
+        "availability": {},
+        "partial_failure": True,
+        "login_required": status == "login_required",
+        "automation_blocked": status == "automation_blocked",
+        "error_type": error_type,
+        "error_message": str(payload.get("message") or status),
+        "android_status": status,
+    }
+
+
+def _normalize_android_result(payload: dict) -> Dict[str, Any]:
+    if (payload or {}).get("status") != "ok":
+        return _android_error_result(payload or {})
+
+    facilities: Dict[str, dict] = {}
+    availability: Dict[str, Dict[str, list]] = {}
+    for item in payload.get("facilities") or []:
+        raw_id = str(item.get("id") or item.get("facilityId") or "").strip()
+        if not raw_id:
+            continue
+        facilities[raw_id] = {
+            "title": item.get("title") or raw_id,
+            "location": item.get("location") or "성남",
+            "reserveUrl": item.get("reserveUrl") or LIST_URL,
+            "availabilityStatus": "android_chrome_cdp",
+        }
+        availability.setdefault(raw_id, {})
+
+    for slot in payload.get("slots") or []:
+        raw_id = str(slot.get("facilityId") or slot.get("id") or "").strip()
+        ymd = re.sub(r"\D", "", str(slot.get("date") or slot.get("ymd") or ""))[:8]
+        time_content = str(slot.get("timeContent") or slot.get("time") or "").strip()
+        if not raw_id or len(ymd) != 8 or not time_content:
+            continue
+        if raw_id not in facilities:
+            facilities[raw_id] = {
+                "title": slot.get("facilityName") or slot.get("courtName") or raw_id,
+                "location": "성남",
+                "reserveUrl": slot.get("reserveUrl") or LIST_URL,
+                "availabilityStatus": "android_chrome_cdp",
+            }
+        normalized_slot = {
+            "timeContent": time_content,
+            "reserveUrl": slot.get("reserveUrl") or LIST_URL,
+            "source": "android_chrome_cdp",
+        }
+        for key in ("remaining", "available", "statusText", "courtName"):
+            if slot.get(key) not in (None, ""):
+                normalized_slot[key] = slot.get(key)
+        availability.setdefault(raw_id, {}).setdefault(ymd, []).append(normalized_slot)
+
+    slot_count = sum(len(slots or []) for daymap in availability.values() for slots in daymap.values())
+    result: Dict[str, Any] = {
+        "facilities": facilities,
+        "availability": availability,
+        "login_required": False,
+        "android_status": "ok",
+    }
+    if slot_count == 0:
+        result.update(
+            {
+                "partial_failure": True,
+                "android_status": "network_capture_failed",
+                "error_type": "NetworkCaptureFailed",
+                "error_message": "android collector returned zero slots; cache protected until confirmed no-reservation crawl exists",
+            }
+        )
+    return result
+
+
+def _crawl_seongnam_android() -> Dict[str, Any]:
+    payload = _run_android_collector()
+    result = _normalize_android_result(payload)
+    print(
+        "[SEONGNAM][ANDROID] "
+        f"status={payload.get('status')} facilities={len(result.get('facilities') or {})} "
+        f"slots={sum(len(slots or []) for daymap in (result.get('availability') or {}).values() for slots in daymap.values())}"
+    )
+    return result
+
+
+def _github_actions_skip_result() -> Dict[str, Any]:
+    return {
+        "facilities": {},
+        "availability": {},
+        "partial_failure": True,
+        "automation_blocked": True,
+        "android_status": "automation_blocked",
+        "error_type": "AutomationBlocked",
+        "error_message": "GitHub Actions auto mode does not access Seongnam directly; use local Android collector",
+    }
+
+
 def _request(session: requests.Session, method: str, path: str, **kwargs) -> requests.Response:
     response = session.request(method, f"{BASE_URL}/{path}", **kwargs)
     if response.status_code == 404:
@@ -312,7 +454,19 @@ def _crawl_court_threaded(fac_id: str, days_ahead: int) -> Dict[str, list]:
     return _crawl_court(_thread_session(), fac_id, days_ahead)
 
 
-def crawl_seongnam() -> Dict[str, Any]:
+def crawl_seongnam(collector_mode: str | None = None) -> Dict[str, Any]:
+    mode = _collector_mode(collector_mode)
+    if mode == "auto" and os.getenv("GITHUB_ACTIONS"):
+        return _github_actions_skip_result()
+    if mode == "android":
+        return _crawl_seongnam_android()
+    if mode == "auto" and not os.getenv("GITHUB_ACTIONS"):
+        android = _crawl_seongnam_android()
+        if android.get("android_status") not in {"android_device_offline", "AndroidDeviceOffline"} and not (
+            android.get("error_type") == "AndroidDeviceOffline"
+        ):
+            return android
+
     started_at = time.perf_counter()
     session = _session()
     facilities: Dict[str, dict] = {}
@@ -432,4 +586,7 @@ def crawl_seongnam() -> Dict[str, Any]:
 
 
 if __name__ == "__main__":
-    crawl_seongnam()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--collector", choices=["auto", "android", "playwright"], default=None)
+    args = parser.parse_args()
+    print(json.dumps(crawl_seongnam(args.collector), ensure_ascii=False))
