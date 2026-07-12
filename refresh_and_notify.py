@@ -1418,6 +1418,16 @@ def main() -> None:
                 commit=False,
             )
             conn.commit()
+            cache_rows = sum(len(day_map or {}) for day_map in availability_for_write.values())
+            cache_slots = sum(
+                len(slots or [])
+                for day_map in availability_for_write.values()
+                for slots in (day_map or {}).values()
+            )
+            print(
+                f"[CACHE] saved target={clear_target or '(all)'} "
+                f"facilities={len(facilities_for_write)} rows={cache_rows} slots={cache_slots}"
+            )
         except Exception as e:
             conn.rollback()
             # 프론트용 저장이 실패해도 알림은 계속 수행할 수 있게 한다
