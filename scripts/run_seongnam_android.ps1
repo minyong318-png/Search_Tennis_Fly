@@ -5,6 +5,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
+$outerRoot = Split-Path -Parent $root
 $lockDir = Join-Path $root ".cache"
 $lockPath = Join-Path $lockDir "seongnam_android.lock"
 New-Item -ItemType Directory -Force -Path $lockDir | Out-Null
@@ -19,12 +20,28 @@ try {
 
 try {
   Set-Location $root
-  if (-not (Get-Command adb -ErrorAction SilentlyContinue)) {
+  $adb = $env:SEONGNAM_ADB_PATH
+  if (-not $adb) {
+    $adb = $env:DAEHOE_TENNISTOWN_ADB_PATH
+  }
+  if (-not $adb) {
+    $candidate = Join-Path $outerRoot ".tools\android-platform-tools\platform-tools\adb.exe"
+    if (Test-Path $candidate) { $adb = $candidate }
+  }
+  if (-not $adb) {
+    $candidate = Join-Path $outerRoot ".tools\android-sdk\platform-tools\adb.exe"
+    if (Test-Path $candidate) { $adb = $candidate }
+  }
+  if (-not $adb -and (Get-Command adb -ErrorAction SilentlyContinue)) {
+    $adb = "adb"
+  }
+  if (-not $adb) {
     Write-Host "[SEONGNAM][ANDROID] adb not found; install Android platform-tools and add it to PATH"
     exit 2
   }
 
-  $devices = & adb devices
+  $env:SEONGNAM_ADB_PATH = $adb
+  $devices = & $adb devices
   Write-Host ($devices -join "`n")
   if (($devices -join "`n") -match "\tunauthorized") {
     Write-Host "[SEONGNAM][ANDROID] allow the USB debugging prompt on the phone, then rerun"
@@ -35,7 +52,7 @@ try {
     exit 2
   }
 
-  & adb forward "tcp:$Port" "localabstract:chrome_devtools_remote" | Out-Host
+  & $adb forward "tcp:$Port" "localabstract:chrome_devtools_remote" | Out-Host
   $env:RUN_TARGET = "seongnam"
   $env:SEONGNAM_COLLECTOR_MODE = "android"
   & $Python refresh_and_notify.py

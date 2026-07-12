@@ -36,6 +36,18 @@ class SeongnamAndroidCollectorTests(unittest.TestCase):
         self.assertEqual("android_unauthorized", result["unauthorized"]["status"])
         self.assertEqual("android_device_offline", result["missing"]["status"])
 
+    def test_resolves_tennistown_adb_fallback(self):
+        result = run_node_expr(
+            textwrap.dedent(
+                """
+                import { resolveAdbPath } from './scripts/seongnam_android_collector.mjs';
+                console.log(JSON.stringify({adb: resolveAdbPath()}));
+                """
+            )
+        )
+
+        self.assertTrue(result["adb"].endswith("adb.exe") or result["adb"] == "adb")
+
     def test_selects_non_auto_detect_seongnam_tab(self):
         result = run_node_expr(
             textwrap.dedent(

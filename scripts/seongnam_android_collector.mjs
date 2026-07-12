@@ -1,11 +1,24 @@
 import { execFile } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import fs from "node:fs";
+import path from "node:path";
 
 const COLLECTOR = "android_chrome_cdp";
 const BASE_URL = "https://res.isdc.co.kr";
 const LIST_URL = `${BASE_URL}/facilityList.do?facType=29`;
 const CDP_HOST = "http://127.0.0.1:9222";
+const DEFAULT_PAGE_FETCH_TIMEOUT_MS = 15000;
+const DEFAULT_ANDROID_TIMEOUT_MS = 300000;
 const SENSITIVE_HEADERS = new Set(["cookie", "set-cookie", "authorization", "proxy-authorization"]);
+const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
+const REPO_ROOT = path.resolve(SCRIPT_DIR, "..");
+const OUTER_ROOT = path.resolve(REPO_ROOT, "..");
+
+function numberEnv(name, fallback, min = 0, max = Number.MAX_SAFE_INTEGER) {
+  const raw = Number(process.env[name] || "");
+  if (!Number.isFinite(raw)) return fallback;
+  return Math.max(min, Math.min(raw, max));
+}
 
 function nowIso() {
   return new Date().toISOString();
@@ -71,6 +84,20 @@ function execFileText(command, args, options = {}) {
       resolve(String(stdout || ""));
     });
   });
+}
+
+export function resolveAdbPath() {
+  const candidates = [
+    process.env.SEONGNAM_ADB_PATH,
+    process.env.DAEHOE_TENNISTOWN_ADB_PATH,
+    path.join(OUTER_ROOT, ".tools", "android-platform-tools", "platform-tools", process.platform === "win32" ? "adb.exe" : "adb"),
+    path.join(OUTER_ROOT, ".tools", "android-sdk", "platform-tools", process.platform === "win32" ? "adb.exe" : "adb"),
+    "adb",
+  ].filter(Boolean);
+  for (const candidate of candidates) {
+    if (candidate === "adb" || fs.existsSync(candidate)) return candidate;
+  }
+  return "adb";
 }
 
 export function parseAdbDevices(output) {
@@ -264,8 +291,9 @@ async function connectCdp(wsUrl) {
   ws.addEventListener("message", (event) => {
     const msg = JSON.parse(event.data);
     if (msg.id && pending.has(msg.id)) {
-      const { resolve, reject } = pending.get(msg.id);
+      const { resolve, reject, timer } = pending.get(msg.id);
       pending.delete(msg.id);
+      clearTimeout(timer);
       if (msg.error) reject(new Error(msg.error.message || "cdp command failed"));
       else resolve(msg.result || {});
       return;
@@ -279,12 +307,12 @@ async function connectCdp(wsUrl) {
       const id = nextId++;
       ws.send(JSON.stringify({ id, method, params }));
       return new Promise((resolve, reject) => {
-        pending.set(id, { resolve, reject });
-        setTimeout(() => {
+        const timer = setTimeout(() => {
           if (!pending.has(id)) return;
           pending.delete(id);
           reject(new Error(`cdp timeout: ${method}`));
         }, 30000);
+        pending.set(id, { resolve, reject, timer });
       });
     },
     on(method, fn) {
@@ -313,18 +341,33 @@ function jsString(value) {
 }
 
 async function pageFetchText(cdp, url, options = {}) {
+  const timeoutMs = numberEnv(
+    "SEONGNAM_ANDROID_FETCH_TIMEOUT_MS",
+    DEFAULT_PAGE_FETCH_TIMEOUT_MS,
+    1000,
+    60000
+  );
   const optionJson = JSON.stringify({
     method: options.method || "GET",
     credentials: "include",
     headers: options.headers || { Accept: "*/*" },
     body: options.body || undefined,
   });
+  const timeoutJson = JSON.stringify(timeoutMs);
   return evaluate(
     cdp,
     `(async () => {
-      const res = await fetch(${jsString(url)}, ${optionJson});
-      const text = await res.text();
-      return { ok: res.ok, status: res.status, url: res.url, contentType: res.headers.get('content-type') || '', text };
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), ${timeoutJson});
+      try {
+        const opts = ${optionJson};
+        opts.signal = controller.signal;
+        const res = await fetch(${jsString(url)}, opts);
+        const text = await res.text();
+        return { ok: res.ok, status: res.status, url: res.url, contentType: res.headers.get('content-type') || '', text };
+      } finally {
+        clearTimeout(timer);
+      }
     })()`
   );
 }
@@ -333,12 +376,25 @@ async function collectWithPageFetch(cdp, diagnostics) {
   const facilitiesById = new Map();
   const availabilityById = new Map();
   const daysAhead = Math.max(0, Math.min(Number(process.env.SEONGNAM_DAYS_AHEAD || 7), 45));
+  const maxCourts = numberEnv("SEONGNAM_ANDROID_MAX_COURTS", 0, 0, 500);
+  const deadlineMs = Date.now() + numberEnv(
+    "SEONGNAM_ANDROID_TIMEOUT_MS",
+    DEFAULT_ANDROID_TIMEOUT_MS,
+    10000,
+    900000
+  );
+  const assertDeadline = () => {
+    if (Date.now() > deadlineMs) throw new Error("collection_deadline_exceeded");
+  };
+  assertDeadline();
   const list = await pageFetchText(cdp, LIST_URL, { headers: { Accept: "text/html,*/*" } });
   diagnostics.responses.push({ url: list.url, status: list.status, contentType: list.contentType });
   if (!list.ok) throw new Error(`facility_list_http_${list.status}`);
   const groups = parseFacilityListHtml(list.text);
   diagnostics.groups = groups.length;
   for (const group of groups) {
+    assertDeadline();
+    if (maxCourts && facilitiesById.size >= maxCourts) break;
     const body = new URLSearchParams({ groupId: group.groupId }).toString();
     const response = await pageFetchText(cdp, `${BASE_URL}/tennisList.do`, {
       method: "POST",
@@ -348,6 +404,7 @@ async function collectWithPageFetch(cdp, diagnostics) {
     diagnostics.responses.push({ url: response.url, status: response.status, contentType: response.contentType });
     if (!response.ok) continue;
     for (const court of parseGroupHtml(response.text, group.title)) {
+      if (maxCourts && facilitiesById.size >= maxCourts) break;
       facilitiesById.set(court.facId, {
         title: court.title || group.title || court.facId,
       });
@@ -356,8 +413,10 @@ async function collectWithPageFetch(cdp, diagnostics) {
   }
   diagnostics.courts = facilitiesById.size;
   for (const facId of facilitiesById.keys()) {
+    assertDeadline();
     const daymap = availabilityById.get(facId) || {};
     for (let offset = 0; offset <= daysAhead; offset += 1) {
+      assertDeadline();
       const date = ymd(offset);
       daymap[date] = [];
       const status = await pageFetchText(
@@ -427,9 +486,10 @@ async function collectDomFallback(cdp) {
 }
 
 export async function collectAndroid() {
+  const adbPath = resolveAdbPath();
   let device;
   try {
-    device = parseAdbDevices(await execFileText("adb", ["devices"]));
+    device = parseAdbDevices(await execFileText(adbPath, ["devices"]));
   } catch (error) {
     return fail("android_cdp_unavailable", "adb 명령을 실행할 수 없습니다. Android platform-tools 설치와 PATH를 확인하세요.");
   }
@@ -440,7 +500,7 @@ export async function collectAndroid() {
     return fail("android_device_offline", "USB 디버깅이 활성화된 Android 기기를 연결한 뒤 다시 실행하세요.", { device_serial: maskSerial(device.serial) });
   }
   try {
-    await execFileText("adb", ["forward", "tcp:9222", "localabstract:chrome_devtools_remote"]);
+    await execFileText(adbPath, ["forward", "tcp:9222", "localabstract:chrome_devtools_remote"]);
   } catch (error) {
     return fail("android_cdp_unavailable", "ADB port forwarding에 실패했습니다. Chrome이 실행 중인지 확인하세요.", { device_serial: maskSerial(device.serial) });
   }
