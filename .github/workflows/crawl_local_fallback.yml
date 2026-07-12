@@ -51,6 +51,10 @@ jobs:
           & $python --version
           & $python -m pip install --upgrade pip
           & $python -m pip install -r requirements.txt
+          if (Get-Command npm -ErrorAction SilentlyContinue) {
+            npm install --no-save playwright
+            npx playwright install chromium
+          }
 
       - name: Refresh Korean gov SSL pins
         shell: powershell
@@ -75,6 +79,7 @@ jobs:
           GYS_PW: ${{ secrets.GYS_PW }}
           ISDC_ID: ${{ secrets.ISDC_ID }}
           ISDC_PW: ${{ secrets.ISDC_PW }}
+          SEONGNAM_STORAGE_STATE: ".cache/seongnam_storage_state.json"
           VAPID_PUBLIC_KEY: ${{ secrets.VAPID_PUBLIC_KEY }}
           VAPID_PRIVATE_KEY: ${{ secrets.VAPID_PRIVATE_KEY }}
           VAPID_SUBJECT: ${{ secrets.VAPID_SUBJECT }}

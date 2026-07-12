@@ -1,5 +1,7 @@
+import json
 import os
 import re
+import subprocess
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -38,6 +40,25 @@ def _request_timeout() -> float:
         return 8.0
 
 
+def _storage_state_path() -> str:
+    return os.getenv("SEONGNAM_STORAGE_STATE") or os.path.join(
+        os.getcwd(), ".cache", "seongnam_storage_state.json"
+    )
+
+
+def _remove_file_quietly(path: str) -> None:
+    try:
+        os.remove(path)
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        print(f"[SEONGNAM][AUTH] storage cleanup failed path={path} error={exc}")
+
+
+def _has_credentials() -> bool:
+    return bool((os.getenv("ISDC_ID") or "").strip() and (os.getenv("ISDC_PW") or ""))
+
+
 def _clean_text(value: str) -> str:
     return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", value or "")).strip()
 
@@ -67,11 +88,113 @@ def _login(session: requests.Session) -> bool:
     return success
 
 
+def _apply_storage_state(session: requests.Session, path: str | None = None) -> bool:
+    state_path = path or _storage_state_path()
+    try:
+        with open(state_path, "r", encoding="utf-8") as fp:
+            state = json.load(fp)
+    except (OSError, json.JSONDecodeError):
+        return False
+
+    loaded = 0
+    for cookie in state.get("cookies") or []:
+        domain = str(cookie.get("domain") or "")
+        if "res.isdc.co.kr" not in domain:
+            continue
+        name = str(cookie.get("name") or "")
+        value = str(cookie.get("value") or "")
+        if not name:
+            continue
+        session.cookies.set(
+            name,
+            value,
+            domain=domain.lstrip(".") or "res.isdc.co.kr",
+            path=str(cookie.get("path") or "/"),
+        )
+        loaded += 1
+    if loaded:
+        print(f"[SEONGNAM][AUTH] storage_state=loaded cookies={loaded}")
+    return loaded > 0
+
+
+def _has_login_challenge(html: str) -> bool:
+    lowered = (html or "").lower()
+    return any(
+        marker in lowered
+        for marker in (
+            "rest_logincheck.do",
+            'name="web_id"',
+            "name='web_id'",
+            'id="web_id"',
+            'name="web_pw"',
+            "name='web_pw'",
+            'id="web_pw"',
+        )
+    )
+
+
+def _validate_logged_in_session(session: requests.Session) -> bool:
+    try:
+        response = session.get(LIST_URL, timeout=_request_timeout())
+        response.raise_for_status()
+    except requests.RequestException as exc:
+        print(f"[SEONGNAM][AUTH] storage_state=invalid error={exc}")
+        return False
+    valid = bool(re.search(r'name=["\']groupId["\']\s+value=["\']\d+', response.text)) and not _has_login_challenge(response.text)
+    print(f"[SEONGNAM][AUTH] storage_state={'valid' if valid else 'invalid'}")
+    return valid
+
+
+def _run_playwright_login() -> bool:
+    script_path = os.path.join(os.path.dirname(__file__), "scripts", "seongnam_session.mjs")
+    state_path = _storage_state_path()
+    os.makedirs(os.path.dirname(state_path), exist_ok=True)
+    timeout = int(max(30, min(_request_timeout() * 20, 180)))
+    env = os.environ.copy()
+    env["SEONGNAM_STORAGE_STATE"] = state_path
+    try:
+        completed = subprocess.run(
+            ["node", script_path],
+            cwd=os.path.dirname(__file__),
+            env=env,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        print(f"[SEONGNAM][AUTH] playwright login unavailable error={exc}")
+        return False
+    if completed.stdout.strip():
+        print(completed.stdout.strip())
+    if completed.returncode != 0:
+        message = (completed.stderr or completed.stdout or "").strip().splitlines()[-1:]
+        print(f"[SEONGNAM][AUTH] playwright login failed error={' '.join(message)}")
+        return False
+    return True
+
+
+def _ensure_authenticated_session(session: requests.Session) -> bool:
+    if _apply_storage_state(session) and _validate_logged_in_session(session):
+        return True
+
+    if not _has_credentials():
+        return _login(session)
+
+    _remove_file_quietly(_storage_state_path())
+    if _run_playwright_login():
+        session.cookies.clear()
+        if _apply_storage_state(session) and _validate_logged_in_session(session):
+            return True
+
+    return _login(session)
+
+
 def _request(session: requests.Session, method: str, path: str, **kwargs) -> requests.Response:
     response = session.request(method, f"{BASE_URL}/{path}", **kwargs)
     if response.status_code == 404:
-        print(f"[SEONGNAM][AUTH] session expired path={path}; retry login")
-        if _login(session):
+        print(f"[SEONGNAM][AUTH] session expired path={path}; retry authentication")
+        if _ensure_authenticated_session(session):
             response = session.request(method, f"{BASE_URL}/{path}", **kwargs)
     response.raise_for_status()
     return response
@@ -143,7 +266,7 @@ def _thread_session() -> requests.Session:
         session = _session()
         user_id = (os.getenv("ISDC_ID") or "").strip()
         password = os.getenv("ISDC_PW") or ""
-        if (user_id or password) and not _login(session) and _require_login():
+        if (user_id or password) and not _ensure_authenticated_session(session) and _require_login():
             raise RuntimeError("seongnam thread login failed")
         _thread_local.session = session
     return session
@@ -186,7 +309,7 @@ def crawl_seongnam() -> Dict[str, Any]:
     facilities: Dict[str, dict] = {}
     availability: Dict[str, Dict[str, list]] = {}
     total = ok = empty = fail = 0
-    login_ok = _login(session)
+    login_ok = _ensure_authenticated_session(session)
     login_required = _require_login() and not login_ok
 
     try:
