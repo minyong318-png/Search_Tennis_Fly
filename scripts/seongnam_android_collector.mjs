@@ -118,6 +118,14 @@ export function resolveAdbPath() {
     process.env.DAEHOE_TENNISTOWN_ADB_PATH,
     path.join(OUTER_ROOT, ".tools", "android-platform-tools", "platform-tools", process.platform === "win32" ? "adb.exe" : "adb"),
     path.join(OUTER_ROOT, ".tools", "android-sdk", "platform-tools", process.platform === "win32" ? "adb.exe" : "adb"),
+    path.join(ROOT, ".tools", "android-platform-tools", "platform-tools", process.platform === "win32" ? "adb.exe" : "adb"),
+    path.join(ROOT, ".tools", "android-sdk", "platform-tools", process.platform === "win32" ? "adb.exe" : "adb"),
+    process.platform === "win32" ? "D:\\Python_Save\\search_tennis_cloudflared\\.tools\\android-platform-tools\\platform-tools\\adb.exe" : null,
+    process.platform === "win32" ? "D:\\Python_Save\\search_tennis_cloudflared\\.tools\\android-sdk\\platform-tools\\adb.exe" : null,
+    process.env.ANDROID_HOME ? path.join(process.env.ANDROID_HOME, "platform-tools", process.platform === "win32" ? "adb.exe" : "adb") : null,
+    process.env.ANDROID_SDK_ROOT ? path.join(process.env.ANDROID_SDK_ROOT, "platform-tools", process.platform === "win32" ? "adb.exe" : "adb") : null,
+    process.platform === "win32" ? "C:\\Android\\platform-tools\\adb.exe" : null,
+    process.platform === "win32" ? "C:\\platform-tools\\adb.exe" : null,
     "adb",
   ].filter(Boolean);
   for (const candidate of candidates) {

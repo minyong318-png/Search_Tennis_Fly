@@ -32,6 +32,38 @@ try {
     $candidate = Join-Path $outerRoot ".tools\android-sdk\platform-tools\adb.exe"
     if (Test-Path $candidate) { $adb = $candidate }
   }
+  if (-not $adb) {
+    $candidate = Join-Path $root ".tools\android-platform-tools\platform-tools\adb.exe"
+    if (Test-Path $candidate) { $adb = $candidate }
+  }
+  if (-not $adb) {
+    $candidate = Join-Path $root ".tools\android-sdk\platform-tools\adb.exe"
+    if (Test-Path $candidate) { $adb = $candidate }
+  }
+  if (-not $adb) {
+    $candidate = "D:\Python_Save\search_tennis_cloudflared\.tools\android-platform-tools\platform-tools\adb.exe"
+    if (Test-Path $candidate) { $adb = $candidate }
+  }
+  if (-not $adb) {
+    $candidate = "D:\Python_Save\search_tennis_cloudflared\.tools\android-sdk\platform-tools\adb.exe"
+    if (Test-Path $candidate) { $adb = $candidate }
+  }
+  if (-not $adb -and $env:ANDROID_HOME) {
+    $candidate = Join-Path $env:ANDROID_HOME "platform-tools\adb.exe"
+    if (Test-Path $candidate) { $adb = $candidate }
+  }
+  if (-not $adb -and $env:ANDROID_SDK_ROOT) {
+    $candidate = Join-Path $env:ANDROID_SDK_ROOT "platform-tools\adb.exe"
+    if (Test-Path $candidate) { $adb = $candidate }
+  }
+  if (-not $adb) {
+    $candidate = "C:\Android\platform-tools\adb.exe"
+    if (Test-Path $candidate) { $adb = $candidate }
+  }
+  if (-not $adb) {
+    $candidate = "C:\platform-tools\adb.exe"
+    if (Test-Path $candidate) { $adb = $candidate }
+  }
   if (-not $adb -and (Get-Command adb -ErrorAction SilentlyContinue)) {
     $adb = "adb"
   }
