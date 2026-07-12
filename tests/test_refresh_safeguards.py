@@ -28,6 +28,21 @@ class RefreshSafeguardTests(unittest.TestCase):
         self.assertIn("uijeongbu", CITY_CONFIG)
         self.assertIn("yangpyeong", CITY_CONFIG)
 
+    def test_hanam_partial_failure_is_excluded_from_cache_writes(self):
+        import refresh_and_notify
+
+        payload = {
+            "facilities": {"misa-1": {"title": "미사"}},
+            "availability": {"misa-1": {"20260712": [{"timeContent": "09:00"}]}},
+            "partial_failure": True,
+        }
+        with patch.dict(os.environ, {"RUN_TARGET": "hanam"}), patch.object(
+            refresh_and_notify.crawl_extra_cities, "crawl_hanam", return_value=payload
+        ):
+            refresh_and_notify.crawl_all()
+
+        self.assertIn("hanam:", refresh_and_notify.LAST_FAILED_PREFIXES)
+
     def test_zero_slots_can_clear_cache_when_crawl_completed(self):
         from refresh_and_notify import should_protect_cache
 

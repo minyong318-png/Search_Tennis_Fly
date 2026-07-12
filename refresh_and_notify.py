@@ -707,6 +707,8 @@ def crawl_all() -> Tuple[Dict[str, Any], Dict[str, Dict[str, List[Any]]]]:
     # -----------------------------
     if target in ("all", "hanam"):
         out_hn = run_crawler("hanam", "hanam", crawl_extra_cities.HANAM_BASE, crawl_extra_cities.crawl_hanam)
+        if out_hn.get("diagnostic", {}).get("status") not in {"normal", "no_reservations"}:
+            LAST_FAILED_PREFIXES.add("hanam:")
         for raw_fid, meta in (out_hn.get("facilities") or {}).items():
             facilities[_ns_hanam_id(str(raw_fid))] = meta
         for raw_fid, daymap in (out_hn.get("availability") or {}).items():
