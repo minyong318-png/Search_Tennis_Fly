@@ -1,4 +1,5 @@
 import unittest
+import os
 from datetime import date
 from unittest.mock import Mock, patch
 
@@ -6,6 +7,11 @@ import crawl_extra_cities
 
 
 class ExtraCitiesHealthTests(unittest.TestCase):
+    def test_hanam_defaults_to_seven_days_ahead(self):
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("HANAM_DAYS_AHEAD", None)
+            self.assertEqual(7, crawl_extra_cities._hanam_days_ahead())
+
     @patch.object(crawl_extra_cities, "_session")
     def test_hanam_misa_retries_transient_404_once(self, session_factory):
         session = Mock()

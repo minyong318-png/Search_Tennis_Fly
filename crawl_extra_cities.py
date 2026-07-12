@@ -73,6 +73,13 @@ def _date_values(days_ahead: int = 45) -> List[date]:
     return [start + timedelta(days=offset) for offset in range(days_ahead + 1)]
 
 
+def _hanam_days_ahead() -> int:
+    try:
+        return max(1, min(int(os.getenv("HANAM_DAYS_AHEAD", "7")), 45))
+    except ValueError:
+        return 7
+
+
 def _month_values(months_ahead: int = 1) -> List[str]:
     months: List[str] = []
     current = date.today().replace(day=1)
@@ -246,6 +253,7 @@ def _fetch_hanam_sports_day(place_code: str, day: date) -> tuple[str, Dict[str, 
 
 
 def crawl_hanam() -> Dict[str, Any]:
+    days_ahead = _hanam_days_ahead()
     courts = {"TS01": "1", "TS02": "2", "TS03": "3", "TS04": "4"}
     facilities = {
         f"misa-hangang-{court_no}": {
@@ -274,8 +282,9 @@ def crawl_hanam() -> Dict[str, Any]:
                 "location": "\ud558\ub0a8\uc2dc",
                 "reserveUrl": f"{HANAM_SPORTS_BASE}/?place_code={place_code}",
             }
-    availability = {fid: _empty_daymap() for fid in facilities}
-    tasks = [(code, court_no, day) for code, court_no in courts.items() for day in _date_values()]
+    availability = {fid: _empty_daymap(days_ahead) for fid in facilities}
+    dates = _date_values(days_ahead)
+    tasks = [(code, court_no, day) for code, court_no in courts.items() for day in dates]
     stats = {"ok": 0, "fail": 0}
     with ThreadPoolExecutor(max_workers=8) as executor:
         futures = {executor.submit(_fetch_hanam_day, code, court_no, day): (code, court_no, day) for code, court_no, day in tasks}
@@ -288,7 +297,7 @@ def crawl_hanam() -> Dict[str, Any]:
             except Exception as exc:
                 stats["fail"] += 1
                 print(f"[HANAM][WARN] code={code} date={day:%Y%m%d} error={exc}")
-    sports_tasks = [(place_code, day) for place_code in sports_places for day in _date_values()]
+    sports_tasks = [(place_code, day) for place_code in sports_places for day in dates]
     sports_stats = {"ok": 0, "fail": 0}
     with ThreadPoolExecutor(max_workers=6) as executor:
         futures = {executor.submit(_fetch_hanam_sports_day, place_code, day): (place_code, day) for place_code, day in sports_tasks}
