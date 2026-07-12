@@ -1,6 +1,8 @@
 import { execFile } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import fs from "node:fs";
+import http from "node:http";
+import https from "node:https";
 import path from "node:path";
 
 const COLLECTOR = "android_chrome_cdp";
@@ -297,10 +299,32 @@ function normalizeCollectorData(facilitiesById, availabilityById, diagnostics, p
   return ok({ deviceSerial, pageUrl, facilities, slots, diagnostics });
 }
 
-async function getJson(url) {
-  const response = await fetch(url);
-  if (!response.ok) throw new Error(`http_${response.status}`);
-  return response.json();
+async function getJson(url, timeoutMs = 2000) {
+  return new Promise((resolve, reject) => {
+    const client = String(url).startsWith("https:") ? https : http;
+    const request = client.get(url, { timeout: timeoutMs }, (response) => {
+      let body = "";
+      response.setEncoding("utf8");
+      response.on("data", (chunk) => {
+        body += chunk;
+      });
+      response.on("end", () => {
+        if (response.statusCode < 200 || response.statusCode >= 300) {
+          reject(new Error(`http_${response.statusCode}`));
+          return;
+        }
+        try {
+          resolve(JSON.parse(body || "null"));
+        } catch (error) {
+          reject(new Error(`invalid_json:${error.message}`));
+        }
+      });
+    });
+    request.on("timeout", () => {
+      request.destroy(new Error("timeout"));
+    });
+    request.on("error", reject);
+  });
 }
 
 async function connectCdp(wsUrl) {
@@ -341,7 +365,7 @@ async function connectCdp(wsUrl) {
       const id = nextId++;
       ws.send(JSON.stringify({ id, method, params }));
       return new Promise((resolve, reject) => {
-        const timeoutMs = numberEnv("SEONGNAM_ANDROID_CDP_TIMEOUT_MS", 120000, 30000, 300000);
+        const timeoutMs = numberEnv("SEONGNAM_ANDROID_CDP_TIMEOUT_MS", 15000, 5000, 300000);
         const timer = setTimeout(() => {
           if (!pending.has(id)) return;
           pending.delete(id);
@@ -742,15 +766,23 @@ export async function collectAndroid() {
   }
 
   let tabs = [];
+  let endpointSuccesses = 0;
   const endpointDiagnostics = {};
   for (const endpoint of ["/json", "/json/list", "/json/version"]) {
     try {
       const payload = await getJson(`${CDP_HOST}${endpoint}`);
+      endpointSuccesses += 1;
       endpointDiagnostics[endpoint] = Array.isArray(payload) ? { count: payload.length } : { ok: true };
       if (Array.isArray(payload) && !tabs.length) tabs = payload;
     } catch (error) {
       endpointDiagnostics[endpoint] = { error: error.message };
     }
+  }
+  if (endpointSuccesses === 0) {
+    return fail("android_cdp_unavailable", "Android Chrome CDP 엔드포인트가 응답하지 않습니다. 휴대폰 Chrome 실행과 원격 디버깅 소켓을 확인하세요.", {
+      device_serial: maskSerial(device.serial),
+      diagnostics: { tab_found: false, endpoints: endpointDiagnostics },
+    });
   }
   const tab = selectSeongnamTab(tabs);
   if (!tab?.webSocketDebuggerUrl) {
