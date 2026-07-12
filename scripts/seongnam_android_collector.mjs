@@ -7,15 +7,17 @@ const COLLECTOR = "android_chrome_cdp";
 const BASE_URL = "https://res.isdc.co.kr";
 const LIST_URL = `${BASE_URL}/facilityList.do?facType=29`;
 const CDP_HOST = "http://127.0.0.1:9222";
-const DEFAULT_PAGE_FETCH_TIMEOUT_MS = 15000;
+const DEFAULT_PAGE_FETCH_TIMEOUT_MS = 10000;
 const DEFAULT_ANDROID_TIMEOUT_MS = 300000;
 const SENSITIVE_HEADERS = new Set(["cookie", "set-cookie", "authorization", "proxy-authorization"]);
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(SCRIPT_DIR, "..");
 const OUTER_ROOT = path.resolve(REPO_ROOT, "..");
 
-function numberEnv(name, fallback, min = 0, max = Number.MAX_SAFE_INTEGER) {
-  const raw = Number(process.env[name] || "");
+export function numberEnv(name, fallback, min = 0, max = Number.MAX_SAFE_INTEGER) {
+  const value = process.env[name];
+  if (value === undefined || String(value).trim() === "") return fallback;
+  const raw = Number(value);
   if (!Number.isFinite(raw)) return fallback;
   return Math.max(min, Math.min(raw, max));
 }
@@ -344,6 +346,32 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+export async function mapWithConcurrency(items, concurrency, mapper) {
+  const values = Array.from(items || []);
+  const limit = Math.max(1, Math.min(Number(concurrency) || 1, values.length || 1));
+  const results = new Array(values.length);
+  let nextIndex = 0;
+  async function worker() {
+    while (nextIndex < values.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      results[index] = await mapper(values[index], index);
+    }
+  }
+  await Promise.all(Array.from({ length: limit }, () => worker()));
+  return results;
+}
+
+export async function retryAsync(fn, retries = 1, delayMs = 250) {
+  let lastValue;
+  for (let attempt = 0; attempt <= retries; attempt += 1) {
+    lastValue = await fn(attempt);
+    if (!lastValue?.fetchError) return lastValue;
+    if (attempt < retries && delayMs) await sleep(delayMs);
+  }
+  return lastValue;
+}
+
 async function pageFetchText(cdp, url, options = {}) {
   const timeoutMs = numberEnv(
     "SEONGNAM_ANDROID_FETCH_TIMEOUT_MS",
@@ -351,6 +379,7 @@ async function pageFetchText(cdp, url, options = {}) {
     1000,
     60000
   );
+  const retries = numberEnv("SEONGNAM_ANDROID_FETCH_RETRIES", 1, 0, 3);
   const optionJson = JSON.stringify({
     method: options.method || "GET",
     credentials: "include",
@@ -358,9 +387,9 @@ async function pageFetchText(cdp, url, options = {}) {
     body: options.body || undefined,
   });
   const timeoutJson = JSON.stringify(timeoutMs);
-  return evaluate(
-    cdp,
-    `(async () => {
+  return retryAsync(() => evaluate(
+      cdp,
+      `(async () => {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), ${timeoutJson});
       try {
@@ -375,6 +404,9 @@ async function pageFetchText(cdp, url, options = {}) {
         clearTimeout(timer);
       }
     })()`
+    ),
+    retries,
+    250
   );
 }
 
@@ -383,7 +415,8 @@ async function collectWithPageFetch(cdp, diagnostics) {
   const availabilityById = new Map();
   const daysAhead = Math.max(0, Math.min(Number(process.env.SEONGNAM_DAYS_AHEAD || 7), 45));
   const maxCourts = numberEnv("SEONGNAM_ANDROID_MAX_COURTS", 0, 0, 500);
-  const requestDelayMs = numberEnv("SEONGNAM_ANDROID_REQUEST_DELAY_MS", 100, 0, 5000);
+  const concurrency = numberEnv("SEONGNAM_ANDROID_CONCURRENCY", 8, 1, 8);
+  const requestDelayMs = numberEnv("SEONGNAM_ANDROID_REQUEST_DELAY_MS", 0, 0, 5000);
   const deadlineMs = Date.now() + numberEnv(
     "SEONGNAM_ANDROID_TIMEOUT_MS",
     DEFAULT_ANDROID_TIMEOUT_MS,
@@ -444,19 +477,21 @@ async function collectWithPageFetch(cdp, diagnostics) {
     }
   }
   diagnostics.courts = facilitiesById.size;
+  diagnostics.concurrency = concurrency;
+  const jobs = [];
   for (const facId of facilitiesById.keys()) {
-    if (deadlineExceeded()) {
-      markDeadline();
-      break;
-    }
-    const daymap = availabilityById.get(facId) || {};
     for (let offset = 0; offset <= daysAhead; offset += 1) {
+      jobs.push({ facId, date: ymd(offset) });
+    }
+  }
+  await mapWithConcurrency(jobs, concurrency, async ({ facId, date }) => {
       if (deadlineExceeded()) {
         markDeadline();
-        break;
+        return;
       }
-      const date = ymd(offset);
+      const daymap = availabilityById.get(facId) || {};
       daymap[date] = [];
+      availabilityById.set(facId, daymap);
       const status = await pageFetchText(
         cdp,
         `${BASE_URL}/getReservationInfoByDate.do?facId=${encodeURIComponent(facId)}&resdate=${encodeURIComponent(ymdDash(date))}`,
@@ -464,8 +499,12 @@ async function collectWithPageFetch(cdp, diagnostics) {
       );
       recordResponse(status, { kind: "date_status", facId, date });
       if (requestDelayMs) await sleep(requestDelayMs);
-      if (status.fetchError || !status.ok) continue;
-      if (["closed", "empty", "full"].includes(String(status.text || "").trim().toLowerCase())) continue;
+      if (status.fetchError || !status.ok) return;
+      if (["closed", "empty", "full"].includes(String(status.text || "").trim().toLowerCase())) return;
+      if (deadlineExceeded()) {
+        markDeadline();
+        return;
+      }
       const table = await pageFetchText(cdp, `${BASE_URL}/getTimeTableByDate.do`, {
         method: "POST",
         headers: { "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8", Accept: "text/html,*/*" },
@@ -473,14 +512,12 @@ async function collectWithPageFetch(cdp, diagnostics) {
       });
       recordResponse(table, { kind: "time_table", facId, date });
       if (requestDelayMs) await sleep(requestDelayMs);
-      if (table.fetchError || !table.ok) continue;
+      if (table.fetchError || !table.ok) return;
       daymap[date] = parseTimetableHtml(table.text).map((slot) => ({
         ...slot,
         courtName: facilitiesById.get(facId)?.title || facId,
       }));
-    }
-    availabilityById.set(facId, daymap);
-  }
+  });
   return { facilitiesById, availabilityById };
 }
 

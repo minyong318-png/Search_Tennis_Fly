@@ -48,6 +48,26 @@ class SeongnamAndroidCollectorTests(unittest.TestCase):
 
         self.assertTrue(result["adb"].endswith("adb.exe") or result["adb"] == "adb")
 
+    def test_number_env_uses_fallback_for_missing_or_empty_values(self):
+        result = run_node_expr(
+            textwrap.dedent(
+                """
+                import { numberEnv } from './scripts/seongnam_android_collector.mjs';
+                delete process.env.SEONGNAM_TEST_NUMBER;
+                const missing = numberEnv('SEONGNAM_TEST_NUMBER', 8, 1, 10);
+                process.env.SEONGNAM_TEST_NUMBER = '';
+                const empty = numberEnv('SEONGNAM_TEST_NUMBER', 8, 1, 10);
+                process.env.SEONGNAM_TEST_NUMBER = '5';
+                const present = numberEnv('SEONGNAM_TEST_NUMBER', 8, 1, 10);
+                console.log(JSON.stringify({ missing, empty, present }));
+                """
+            )
+        )
+
+        self.assertEqual(8, result["missing"])
+        self.assertEqual(8, result["empty"])
+        self.assertEqual(5, result["present"])
+
     def test_selects_non_auto_detect_seongnam_tab(self):
         result = run_node_expr(
             textwrap.dedent(
@@ -137,6 +157,47 @@ class SeongnamAndroidCollectorTests(unittest.TestCase):
         self.assertNotIn("Cookie", result["headers"])
         self.assertNotIn("Authorization", result["headers"])
         self.assertEqual("text/html", result["headers"]["Accept"])
+
+    def test_map_with_concurrency_limits_active_jobs(self):
+        result = run_node_expr(
+            textwrap.dedent(
+                """
+                import { mapWithConcurrency } from './scripts/seongnam_android_collector.mjs';
+                let active = 0;
+                let maxActive = 0;
+                const values = await mapWithConcurrency([1, 2, 3, 4, 5], 2, async (value) => {
+                  active += 1;
+                  maxActive = Math.max(maxActive, active);
+                  await new Promise((resolve) => setTimeout(resolve, 20));
+                  active -= 1;
+                  return value * 2;
+                });
+                console.log(JSON.stringify({ values, maxActive }));
+                """
+            )
+        )
+
+        self.assertEqual([2, 4, 6, 8, 10], result["values"])
+        self.assertLessEqual(result["maxActive"], 2)
+
+    def test_retry_async_retries_transient_failures(self):
+        result = run_node_expr(
+            textwrap.dedent(
+                """
+                import { retryAsync } from './scripts/seongnam_android_collector.mjs';
+                let attempts = 0;
+                const value = await retryAsync(async () => {
+                  attempts += 1;
+                  if (attempts < 2) return { fetchError: 'temporary' };
+                  return { ok: true, value: 42 };
+                }, 1, 0);
+                console.log(JSON.stringify({ attempts, value }));
+                """
+            )
+        )
+
+        self.assertEqual(2, result["attempts"])
+        self.assertEqual(42, result["value"]["value"])
 
 
 if __name__ == "__main__":
