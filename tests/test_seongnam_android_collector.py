@@ -180,6 +180,22 @@ class SeongnamAndroidCollectorTests(unittest.TestCase):
         self.assertEqual([2, 4, 6, 8, 10], result["values"])
         self.assertLessEqual(result["maxActive"], 2)
 
+    def test_chunk_array_splits_large_batches(self):
+        result = run_node_expr(
+            textwrap.dedent(
+                """
+                import { chunkArray } from './scripts/seongnam_android_collector.mjs';
+                console.log(JSON.stringify({
+                  chunks: chunkArray([1, 2, 3, 4, 5], 2),
+                  one: chunkArray([1, 2], 0)
+                }));
+                """
+            )
+        )
+
+        self.assertEqual([[1, 2], [3, 4], [5]], result["chunks"])
+        self.assertEqual([[1, 2]], result["one"])
+
     def test_retry_async_retries_transient_failures(self):
         result = run_node_expr(
             textwrap.dedent(
@@ -198,6 +214,36 @@ class SeongnamAndroidCollectorTests(unittest.TestCase):
 
         self.assertEqual(2, result["attempts"])
         self.assertEqual(42, result["value"]["value"])
+
+    def test_should_query_court_date_uses_title_schedule_hints(self):
+        result = run_node_expr(
+            textwrap.dedent(
+                """
+                import { shouldQueryCourtDate } from './scripts/seongnam_android_collector.mjs';
+                console.log(JSON.stringify({
+                  sundayYes: shouldQueryCourtDate('탄천 (일요일)1번 코트', '20260726', '20260712'),
+                  sundayNo: shouldQueryCourtDate('탄천 (일요일)1번 코트', '20260727', '20260712'),
+                  saturdayYes: shouldQueryCourtDate('탄천 (토요일,공휴일)2번코트', '20260725', '20260712'),
+                  saturdayNo: shouldQueryCourtDate('탄천 (토요일,공휴일)2번코트', '20260724', '20260712'),
+                  weekdayYes: shouldQueryCourtDate('탄천 1번코트(평일)', '20260724', '20260712'),
+                  weekdayNo: shouldQueryCourtDate('탄천 1번코트(평일)', '20260725', '20260712'),
+                  sameDayOnly: shouldQueryCourtDate('탄천 당일예약 1번 코트(평일)', '20260712', '20260712'),
+                  sameDayFutureNo: shouldQueryCourtDate('탄천 당일예약 1번 코트(평일)', '20260713', '20260712'),
+                  generic: shouldQueryCourtDate('양지 1번 코트', '20260725', '20260712')
+                }));
+                """
+            )
+        )
+
+        self.assertTrue(result["sundayYes"])
+        self.assertFalse(result["sundayNo"])
+        self.assertTrue(result["saturdayYes"])
+        self.assertFalse(result["saturdayNo"])
+        self.assertTrue(result["weekdayYes"])
+        self.assertFalse(result["weekdayNo"])
+        self.assertTrue(result["sameDayOnly"])
+        self.assertFalse(result["sameDayFutureNo"])
+        self.assertTrue(result["generic"])
 
 
 if __name__ == "__main__":

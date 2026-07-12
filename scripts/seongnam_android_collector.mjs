@@ -41,6 +41,30 @@ function normalizeYmd(value) {
   return String(value || "").replace(/\D/g, "").slice(0, 8);
 }
 
+function weekdayOfYmd(value) {
+  const ymdValue = normalizeYmd(value);
+  if (ymdValue.length !== 8) return null;
+  const date = new Date(
+    Number(ymdValue.slice(0, 4)),
+    Number(ymdValue.slice(4, 6)) - 1,
+    Number(ymdValue.slice(6, 8))
+  );
+  return date.getDay();
+}
+
+export function shouldQueryCourtDate(title, dateYmd, todayYmd = ymd(0)) {
+  const text = String(title || "");
+  const date = normalizeYmd(dateYmd);
+  if (!date) return true;
+  if (text.includes("당일예약")) return date === normalizeYmd(todayYmd);
+  const weekday = weekdayOfYmd(date);
+  if (weekday === null) return true;
+  if (text.includes("일요일")) return weekday === 0;
+  if (text.includes("토요일") || text.includes("공휴일")) return weekday === 6;
+  if (text.includes("평일")) return weekday >= 1 && weekday <= 5;
+  return true;
+}
+
 function cleanText(value) {
   return String(value || "").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
 }
@@ -309,11 +333,12 @@ async function connectCdp(wsUrl) {
       const id = nextId++;
       ws.send(JSON.stringify({ id, method, params }));
       return new Promise((resolve, reject) => {
+        const timeoutMs = numberEnv("SEONGNAM_ANDROID_CDP_TIMEOUT_MS", 120000, 30000, 300000);
         const timer = setTimeout(() => {
           if (!pending.has(id)) return;
           pending.delete(id);
           reject(new Error(`cdp timeout: ${method}`));
-        }, 30000);
+        }, timeoutMs);
         pending.set(id, { resolve, reject, timer });
       });
     },
@@ -360,6 +385,16 @@ export async function mapWithConcurrency(items, concurrency, mapper) {
   }
   await Promise.all(Array.from({ length: limit }, () => worker()));
   return results;
+}
+
+export function chunkArray(items, size) {
+  const values = Array.from(items || []);
+  const chunkSize = Math.max(1, Number(size) || values.length || 1);
+  const chunks = [];
+  for (let index = 0; index < values.length; index += chunkSize) {
+    chunks.push(values.slice(index, index + chunkSize));
+  }
+  return chunks;
 }
 
 export async function retryAsync(fn, retries = 1, delayMs = 250) {
@@ -410,12 +445,91 @@ async function pageFetchText(cdp, url, options = {}) {
   );
 }
 
+async function pageFetchManyText(cdp, requests, options = {}) {
+  const timeoutMs = numberEnv(
+    "SEONGNAM_ANDROID_FETCH_TIMEOUT_MS",
+    DEFAULT_PAGE_FETCH_TIMEOUT_MS,
+    1000,
+    60000
+  );
+  const retries = numberEnv("SEONGNAM_ANDROID_FETCH_RETRIES", 1, 0, 3);
+  const concurrency = numberEnv("SEONGNAM_ANDROID_CONCURRENCY", 16, 1, 20);
+  const payload = (requests || []).map((request, index) => ({
+    index,
+    key: request.key ?? index,
+    url: request.url,
+    method: request.method || "GET",
+    headers: request.headers || { Accept: "*/*" },
+    body: request.body || undefined,
+    context: request.context || {},
+  }));
+  if (!payload.length) return [];
+  return retryAsync(() => evaluate(
+      cdp,
+      `(async () => {
+        const requests = ${JSON.stringify(payload)};
+        const timeoutMs = ${JSON.stringify(timeoutMs)};
+        const concurrency = ${JSON.stringify(concurrency)};
+        const results = new Array(requests.length);
+        let nextIndex = 0;
+        async function fetchOne(request) {
+          const controller = new AbortController();
+          const timer = setTimeout(() => controller.abort(), timeoutMs);
+          try {
+            const res = await fetch(request.url, {
+              method: request.method,
+              credentials: 'include',
+              headers: request.headers,
+              body: request.body,
+              signal: controller.signal
+            });
+            const text = await res.text();
+            return {
+              key: request.key,
+              context: request.context,
+              ok: res.ok,
+              status: res.status,
+              url: res.url,
+              contentType: res.headers.get('content-type') || '',
+              text
+            };
+          } catch (error) {
+            return {
+              key: request.key,
+              context: request.context,
+              ok: false,
+              status: 0,
+              url: request.url,
+              contentType: '',
+              text: '',
+              fetchError: String(error && error.message || error)
+            };
+          } finally {
+            clearTimeout(timer);
+          }
+        }
+        async function worker() {
+          while (nextIndex < requests.length) {
+            const current = nextIndex++;
+            results[current] = await fetchOne(requests[current]);
+          }
+        }
+        await Promise.all(Array.from({ length: Math.min(concurrency, requests.length) }, () => worker()));
+        return results;
+      })()`
+    ),
+    retries,
+    250
+  );
+}
+
 async function collectWithPageFetch(cdp, diagnostics) {
   const facilitiesById = new Map();
   const availabilityById = new Map();
   const daysAhead = Math.max(0, Math.min(Number(process.env.SEONGNAM_DAYS_AHEAD || 7), 45));
   const maxCourts = numberEnv("SEONGNAM_ANDROID_MAX_COURTS", 0, 0, 500);
-  const concurrency = numberEnv("SEONGNAM_ANDROID_CONCURRENCY", 8, 1, 8);
+  const concurrency = numberEnv("SEONGNAM_ANDROID_CONCURRENCY", 16, 1, 20);
+  const batchSize = numberEnv("SEONGNAM_ANDROID_BATCH_SIZE", 120, 10, 1000);
   const requestDelayMs = numberEnv("SEONGNAM_ANDROID_REQUEST_DELAY_MS", 0, 0, 5000);
   const deadlineMs = Date.now() + numberEnv(
     "SEONGNAM_ANDROID_TIMEOUT_MS",
@@ -478,46 +592,82 @@ async function collectWithPageFetch(cdp, diagnostics) {
   }
   diagnostics.courts = facilitiesById.size;
   diagnostics.concurrency = concurrency;
+  diagnostics.batch_size = batchSize;
   const jobs = [];
-  for (const facId of facilitiesById.keys()) {
+  const todayYmd = ymd(0);
+  let skippedBySchedule = 0;
+  for (const [facId, meta] of facilitiesById.entries()) {
     for (let offset = 0; offset <= daysAhead; offset += 1) {
-      jobs.push({ facId, date: ymd(offset) });
+      const date = ymd(offset);
+      if (!shouldQueryCourtDate(meta.title || facId, date, todayYmd)) {
+        skippedBySchedule += 1;
+        const daymap = availabilityById.get(facId) || {};
+        daymap[date] = [];
+        availabilityById.set(facId, daymap);
+        continue;
+      }
+      jobs.push({ facId, date });
     }
   }
-  await mapWithConcurrency(jobs, concurrency, async ({ facId, date }) => {
-      if (deadlineExceeded()) {
-        markDeadline();
-        return;
-      }
+  diagnostics.schedule_skipped = skippedBySchedule;
+  diagnostics.date_jobs = jobs.length;
+  const tableJobs = [];
+  for (const chunk of chunkArray(jobs, batchSize)) {
+    if (deadlineExceeded()) {
+      markDeadline();
+      break;
+    }
+    const statusResponses = await pageFetchManyText(
+      cdp,
+      chunk.map(({ facId, date }) => ({
+        key: `${facId}:${date}`,
+        url: `${BASE_URL}/getReservationInfoByDate.do?facId=${encodeURIComponent(facId)}&resdate=${encodeURIComponent(ymdDash(date))}`,
+        headers: { Accept: "text/plain,*/*" },
+        context: { facId, date },
+      }))
+    );
+    for (const status of statusResponses) {
+      const { facId, date } = status.context || {};
       const daymap = availabilityById.get(facId) || {};
       daymap[date] = [];
       availabilityById.set(facId, daymap);
-      const status = await pageFetchText(
-        cdp,
-        `${BASE_URL}/getReservationInfoByDate.do?facId=${encodeURIComponent(facId)}&resdate=${encodeURIComponent(ymdDash(date))}`,
-        { headers: { Accept: "text/plain,*/*" } }
-      );
       recordResponse(status, { kind: "date_status", facId, date });
-      if (requestDelayMs) await sleep(requestDelayMs);
-      if (status.fetchError || !status.ok) return;
-      if (["closed", "empty", "full"].includes(String(status.text || "").trim().toLowerCase())) return;
-      if (deadlineExceeded()) {
-        markDeadline();
-        return;
-      }
-      const table = await pageFetchText(cdp, `${BASE_URL}/getTimeTableByDate.do`, {
+      if (status.fetchError || !status.ok) continue;
+      if (["closed", "empty", "full"].includes(String(status.text || "").trim().toLowerCase())) continue;
+      tableJobs.push({ facId, date });
+    }
+    if (requestDelayMs) await sleep(requestDelayMs);
+  }
+  diagnostics.table_candidates = tableJobs.length;
+  for (const chunk of chunkArray(tableJobs, batchSize)) {
+    if (deadlineExceeded()) {
+      markDeadline();
+      break;
+    }
+    const tableResponses = await pageFetchManyText(
+      cdp,
+      chunk.map(({ facId, date }) => ({
+        key: `${facId}:${date}`,
+        url: `${BASE_URL}/getTimeTableByDate.do`,
         method: "POST",
         headers: { "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8", Accept: "text/html,*/*" },
         body: new URLSearchParams({ facId, resdate: ymdDash(date) }).toString(),
-      });
+        context: { facId, date },
+      }))
+    );
+    for (const table of tableResponses) {
+      const { facId, date } = table.context || {};
       recordResponse(table, { kind: "time_table", facId, date });
-      if (requestDelayMs) await sleep(requestDelayMs);
-      if (table.fetchError || !table.ok) return;
+      if (table.fetchError || !table.ok) continue;
+      const daymap = availabilityById.get(facId) || {};
       daymap[date] = parseTimetableHtml(table.text).map((slot) => ({
         ...slot,
         courtName: facilitiesById.get(facId)?.title || facId,
       }));
-  });
+      availabilityById.set(facId, daymap);
+    }
+    if (requestDelayMs) await sleep(requestDelayMs);
+  }
   return { facilitiesById, availabilityById };
 }
 
