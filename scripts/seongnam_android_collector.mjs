@@ -365,7 +365,7 @@ async function connectCdp(wsUrl) {
       const id = nextId++;
       ws.send(JSON.stringify({ id, method, params }));
       return new Promise((resolve, reject) => {
-        const timeoutMs = numberEnv("SEONGNAM_ANDROID_CDP_TIMEOUT_MS", 15000, 5000, 300000);
+        const timeoutMs = numberEnv("SEONGNAM_ANDROID_CDP_TIMEOUT_MS", 120000, 5000, 300000);
         const timer = setTimeout(() => {
           if (!pending.has(id)) return;
           pending.delete(id);
