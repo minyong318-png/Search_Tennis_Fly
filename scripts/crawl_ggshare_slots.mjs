@@ -1,7 +1,7 @@
 import { chromium } from "playwright";
 
 const BASE_URL = "https://share.gg.go.kr";
-const DAYS_AHEAD = Number(process.env.GGSHARE_DAYS_AHEAD || 45);
+const DAYS_AHEAD = Number(process.env.GGSHARE_DAYS_AHEAD || 7);
 const USER_ID = process.env.GGSHARE_ID || "";
 const USER_PW = process.env.GGSHARE_PW || "";
 
@@ -205,6 +205,9 @@ async function main() {
         source: "경기공유서비스"
       };
       result.availability[rawId] = {};
+      for (let offset = 0; offset <= DAYS_AHEAD; offset += 1) {
+        result.availability[rawId][addDaysYmd(offset)] = [];
+      }
       try {
         const rows = await fetchSlots(page, item);
         for (const row of rows) {
