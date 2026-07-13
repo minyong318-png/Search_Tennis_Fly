@@ -84,6 +84,8 @@ try {
     exit 2
   }
 
+  & $adb shell am start -a android.intent.action.VIEW -d "https://res.isdc.co.kr/facilityList.do?facType=29" com.android.chrome | Out-Host
+  Start-Sleep -Seconds 3
   & $adb forward "tcp:$Port" "localabstract:chrome_devtools_remote" | Out-Host
   $env:RUN_TARGET = "seongnam"
   $env:SEONGNAM_COLLECTOR_MODE = "android"

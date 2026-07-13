@@ -152,12 +152,16 @@ export function parseAdbDevices(output) {
 }
 
 export function selectSeongnamTab(tabs) {
+  return selectSeongnamTabs(tabs)[0] || null;
+}
+
+function selectSeongnamTabs(tabs) {
   const candidates = (Array.isArray(tabs) ? tabs : []).filter((tab) => {
     const haystack = `${tab?.url || ""} ${tab?.title || ""}`.toLowerCase();
     return haystack.includes("res.isdc.co.kr") && !String(tab?.url || "").includes("auto_detect.do");
   });
   candidates.sort((a, b) => scoreTab(b) - scoreTab(a));
-  return candidates[0] || null;
+  return candidates;
 }
 
 export function hasOnlyBlockedSeongnamTabs(tabs) {
@@ -173,8 +177,11 @@ function scoreTab(tab) {
   let score = 0;
   if (url.includes("facilityList.do")) score += 5;
   if (url.includes("tennis")) score += 4;
+  if (url.includes("reservationInfo.do")) score -= 5;
   if (!url.includes("login.do")) score += 2;
   if (tab?.webSocketDebuggerUrl) score += 1;
+  const numericId = Number(tab?.id);
+  if (Number.isFinite(numericId)) score += numericId / 10000;
   return score;
 }
 
@@ -372,11 +379,11 @@ async function connectCdp(wsUrl) {
     }
   });
   return {
-    send(method, params = {}) {
+    send(method, params = {}, timeoutOverrideMs = null) {
       const id = nextId++;
       ws.send(JSON.stringify({ id, method, params }));
       return new Promise((resolve, reject) => {
-        const timeoutMs = numberEnv("SEONGNAM_ANDROID_CDP_TIMEOUT_MS", 120000, 5000, 300000);
+        const timeoutMs = timeoutOverrideMs || numberEnv("SEONGNAM_ANDROID_CDP_TIMEOUT_MS", 120000, 5000, 300000);
         const timer = setTimeout(() => {
           if (!pending.has(id)) return;
           pending.delete(id);
@@ -396,12 +403,12 @@ async function connectCdp(wsUrl) {
   };
 }
 
-async function evaluate(cdp, expression, awaitPromise = true) {
+async function evaluate(cdp, expression, awaitPromise = true, timeoutOverrideMs = null) {
   const result = await cdp.send("Runtime.evaluate", {
     expression,
     awaitPromise,
     returnByValue: true,
-  });
+  }, timeoutOverrideMs);
   if (result.exceptionDetails) throw new Error("runtime evaluation failed");
   return result.result?.value;
 }
@@ -795,8 +802,8 @@ export async function collectAndroid() {
       diagnostics: { tab_found: false, endpoints: endpointDiagnostics },
     });
   }
-  const tab = selectSeongnamTab(tabs);
-  if (!tab?.webSocketDebuggerUrl) {
+  const tabCandidates = selectSeongnamTabs(tabs);
+  if (!tabCandidates.some((candidate) => candidate?.webSocketDebuggerUrl)) {
     if (hasOnlyBlockedSeongnamTabs(tabs)) {
       return fail("automation_blocked", "Android Chrome에서도 비정상 접근 탐지 탭만 열려 있습니다. 정상 성남 예약 페이지를 직접 열어 주세요.", {
         device_serial: maskSerial(device.serial),
@@ -810,16 +817,34 @@ export async function collectAndroid() {
   }
 
   let cdp;
+  let tab;
+  let pageUrl = "";
+  let bodyText = "";
+  let lastTabError = "";
   try {
-    cdp = await connectCdp(tab.webSocketDebuggerUrl);
-    await Promise.all([
-      cdp.send("Runtime.enable"),
-      cdp.send("Page.enable"),
-      cdp.send("Network.enable"),
-      cdp.send("DOM.enable"),
-    ]);
-    const pageUrl = await evaluate(cdp, "location.href");
-    const bodyText = await evaluate(cdp, "document.body ? document.body.innerText.slice(0, 2000) : ''");
+    for (const candidate of tabCandidates) {
+      if (!candidate?.webSocketDebuggerUrl) continue;
+      try {
+        cdp = await connectCdp(candidate.webSocketDebuggerUrl);
+        await Promise.all([
+          cdp.send("Runtime.enable", {}, 5000),
+          cdp.send("Page.enable", {}, 5000),
+          cdp.send("Network.enable", {}, 5000),
+          cdp.send("DOM.enable", {}, 5000),
+        ]);
+        pageUrl = await evaluate(cdp, "location.href", true, 5000);
+        bodyText = await evaluate(cdp, "document.body ? document.body.innerText.slice(0, 2000) : ''", true, 5000);
+        tab = candidate;
+        break;
+      } catch (error) {
+        lastTabError = error.message;
+        if (cdp) cdp.close();
+        cdp = null;
+      }
+    }
+    if (!cdp || !tab) {
+      throw new Error(lastTabError || "no responsive seongnam cdp tab");
+    }
     const pageStatus = classifyPage(pageUrl, bodyText);
     if (pageStatus === "login_required") {
       return fail("login_required", "휴대폰 Chrome에서 성남 사이트에 직접 로그인한 뒤 다시 실행하세요.", {
