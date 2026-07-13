@@ -87,7 +87,7 @@ try {
   & $adb forward "tcp:$Port" "localabstract:chrome_devtools_remote" | Out-Host
   $env:RUN_TARGET = "seongnam"
   $env:SEONGNAM_COLLECTOR_MODE = "android"
-  if (-not $env:SEONGNAM_DAYS_AHEAD) { $env:SEONGNAM_DAYS_AHEAD = "7" }
+  if (-not $env:SEONGNAM_DAYS_AHEAD) { $env:SEONGNAM_DAYS_AHEAD = "2" }
   if (-not $env:SEONGNAM_ANDROID_TIMEOUT_MS) { $env:SEONGNAM_ANDROID_TIMEOUT_MS = "600000" }
   if (-not $env:SEONGNAM_ANDROID_RUN_TIMEOUT) { $env:SEONGNAM_ANDROID_RUN_TIMEOUT = "900" }
   if (-not $env:SEONGNAM_ANDROID_FETCH_TIMEOUT_MS) { $env:SEONGNAM_ANDROID_FETCH_TIMEOUT_MS = "10000" }

@@ -26,11 +26,11 @@ jobs:
           & $python -m pip install --upgrade pip
           & $python -m pip install -r requirements.txt
 
-      - name: Run Android Chrome refresh (Seongnam, 8 days)
+      - name: Run Android Chrome refresh (Seongnam, 3 days)
         shell: powershell
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
-          SEONGNAM_DAYS_AHEAD: "7"
+          SEONGNAM_DAYS_AHEAD: "2"
           SEONGNAM_ANDROID_TIMEOUT_MS: "600000"
           SEONGNAM_ANDROID_RUN_TIMEOUT: "900"
           SEONGNAM_ANDROID_FETCH_TIMEOUT_MS: "10000"

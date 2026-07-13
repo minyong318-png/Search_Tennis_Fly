@@ -80,7 +80,7 @@ jobs:
           ISDC_PW: ${{ secrets.ISDC_PW }}
           SEONGNAM_STORAGE_STATE: ".cache/seongnam_storage_state.json"
           SEONGNAM_COLLECTOR_MODE: "android"
-          SEONGNAM_DAYS_AHEAD: "7"
+          SEONGNAM_DAYS_AHEAD: "2"
           SEONGNAM_ANDROID_TIMEOUT_MS: "600000"
           SEONGNAM_ANDROID_RUN_TIMEOUT: "900"
           SEONGNAM_ANDROID_FETCH_TIMEOUT_MS: "10000"

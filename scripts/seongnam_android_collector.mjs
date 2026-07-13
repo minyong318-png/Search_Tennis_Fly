@@ -569,7 +569,7 @@ async function pageFetchManyText(cdp, requests, options = {}) {
 async function collectWithPageFetch(cdp, diagnostics) {
   const facilitiesById = new Map();
   const availabilityById = new Map();
-  const daysAhead = Math.max(0, Math.min(Number(process.env.SEONGNAM_DAYS_AHEAD || 7), 45));
+  const daysAhead = Math.max(0, Math.min(Number(process.env.SEONGNAM_DAYS_AHEAD || 2), 45));
   const maxCourts = numberEnv("SEONGNAM_ANDROID_MAX_COURTS", 0, 0, 500);
   const concurrency = numberEnv("SEONGNAM_ANDROID_CONCURRENCY", 16, 1, 20);
   const batchSize = numberEnv("SEONGNAM_ANDROID_BATCH_SIZE", 120, 10, 1000);
