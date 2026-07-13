@@ -21,6 +21,7 @@ import crawl_extra_cities
 from crawler_diagnostics import run_crawler
 
 LAST_FAILED_PREFIXES: Set[str] = set()
+BLOCKED_FRONTEND_PREFIXES: Tuple[str, ...] = ("anseong:", "ggshare:anseong")
 
 
 # =========================================================
@@ -726,7 +727,7 @@ def crawl_all() -> Tuple[Dict[str, Any], Dict[str, Dict[str, List[Any]]]]:
     # -----------------------------
     # (G) 경기공유서비스: 안성/의정부/양평
     # -----------------------------
-    for gg_city in ("anseong", "uijeongbu", "yangpyeong"):
+    for gg_city in ("uijeongbu", "yangpyeong"):
         if target not in ("all", gg_city):
             continue
         out_gg = _stamp_crawl_result(run_crawler(
@@ -741,6 +742,9 @@ def crawl_all() -> Tuple[Dict[str, Any], Dict[str, Dict[str, List[Any]]]]:
             facilities[_ns_ggshare_city_id(gg_city, str(raw_fid))] = meta
         for raw_fid, daymap in (out_gg.get("availability") or {}).items():
             availability[_ns_ggshare_city_id(gg_city, str(raw_fid))] = daymap or {}
+
+    if target == "anseong":
+        print("[ANSEONG] disabled: 안성 코트는 현재 서비스 노출 대상에서 제외합니다.")
 
     # -----------------------------
     # (H) Extra city sources
@@ -887,6 +891,47 @@ def prune_stale_prefix_facilities(
         conn.commit()
     print(f"[PRUNE] prefix={prefix} keep={len(keep_ids)} deleted_facilities={deleted_facilities} deleted_cache={deleted_cache}")
     return deleted_facilities, deleted_cache
+
+
+def purge_blocked_frontend_prefixes(
+    conn: psycopg.Connection,
+    prefixes: Iterable[str] = BLOCKED_FRONTEND_PREFIXES,
+    commit: bool = True,
+) -> Tuple[int, int, int]:
+    clean_prefixes = [str(prefix) for prefix in prefixes if str(prefix)]
+    if not clean_prefixes:
+        return 0, 0, 0
+    like_patterns = [f"{prefix}%" for prefix in clean_prefixes]
+    deleted_cache = 0
+    deleted_facilities = 0
+    deleted_snapshots = 0
+    with conn.cursor() as cur:
+        cur.execute(
+            "delete from public.availability_cache where facility_id like any(%s)",
+            (like_patterns,),
+        )
+        deleted_cache = cur.rowcount or 0
+        cur.execute("select to_regclass('public.slots_snapshot')")
+        if cur.fetchone()[0]:
+            cur.execute(
+                "delete from public.slots_snapshot where facility_id like any(%s)",
+                (like_patterns,),
+            )
+            deleted_snapshots = cur.rowcount or 0
+        cur.execute(
+            "delete from public.facilities where facility_id like any(%s)",
+            (like_patterns,),
+        )
+        deleted_facilities = cur.rowcount or 0
+    if commit:
+        conn.commit()
+    print(
+        "[PRUNE] blocked_prefixes="
+        f"{','.join(clean_prefixes)} deleted_facilities={deleted_facilities} "
+        f"deleted_cache={deleted_cache} deleted_snapshots={deleted_snapshots}"
+    )
+    return deleted_facilities, deleted_cache, deleted_snapshots
+
 
 def delete_expired_availability_cache(conn: psycopg.Connection, commit: bool = True) -> int:
     with conn.cursor() as cur:
@@ -1352,6 +1397,14 @@ def main() -> None:
     if protect_paju_cache:
         facilities_for_write = {k: v for k, v in facilities_for_write.items() if not str(k).startswith("paju:")}
         availability_for_write = {k: v for k, v in availability_for_write.items() if not str(k).startswith("paju:")}
+    facilities_for_write = {
+        k: v for k, v in facilities_for_write.items()
+        if not any(str(k).startswith(prefix) for prefix in BLOCKED_FRONTEND_PREFIXES)
+    }
+    availability_for_write = {
+        k: v for k, v in availability_for_write.items()
+        if not any(str(k).startswith(prefix) for prefix in BLOCKED_FRONTEND_PREFIXES)
+    }
     excluded_cache_prefixes = []
     if protect_yongin_cache:
         excluded_cache_prefixes.append("yongin:")
@@ -1378,6 +1431,7 @@ def main() -> None:
     with psycopg.connect(database_url) as conn:
         # Frontend tables and alarm housekeeping are DB work, so run them after crawling.
         ensure_extra_schema(conn)
+        purge_blocked_frontend_prefixes(conn, commit=False)
         deleted_alarms = cleanup_expired_alarms(conn)
         if deleted_alarms:
             print(f"[ALARMS] expired deleted={deleted_alarms} (KST<{kst_today_yyyymmdd()})")

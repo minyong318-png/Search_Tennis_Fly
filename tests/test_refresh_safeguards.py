@@ -7,7 +7,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 
 class RefreshSafeguardTests(unittest.TestCase):
-    def test_registered_ggshare_city_target_is_executed_and_namespaced(self):
+    def test_anseong_ggshare_city_is_not_collected_for_frontend(self):
         import refresh_and_notify
 
         payload = {
@@ -19,12 +19,12 @@ class RefreshSafeguardTests(unittest.TestCase):
         ) as crawl:
             facilities, availability = refresh_and_notify.crawl_all()
 
-        crawl.assert_called_once_with("anseong")
-        self.assertIn("anseong:F0137-1230001", facilities)
-        self.assertIn("anseong:F0137-1230001", availability)
+        crawl.assert_not_called()
+        self.assertNotIn("anseong:F0137-1230001", facilities)
+        self.assertNotIn("anseong:F0137-1230001", availability)
 
         from check_crawl_health import CITY_CONFIG
-        self.assertIn("anseong", CITY_CONFIG)
+        self.assertNotIn("anseong", CITY_CONFIG)
         self.assertIn("uijeongbu", CITY_CONFIG)
         self.assertIn("yangpyeong", CITY_CONFIG)
 
