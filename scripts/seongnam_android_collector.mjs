@@ -80,6 +80,7 @@ function ok(payload) {
     collected_at: nowIso(),
     facilities: payload.facilities || [],
     slots: payload.slots || [],
+    unavailable_dates: payload.unavailableDates || [],
     diagnostics: payload.diagnostics || {},
   };
 }
@@ -271,6 +272,7 @@ export function parseDomFallbackRows(rows) {
 function normalizeCollectorData(facilitiesById, availabilityById, diagnostics, pageUrl, deviceSerial) {
   const facilities = [];
   const slots = [];
+  const unavailableDates = [];
   for (const [facId, meta] of facilitiesById.entries()) {
     facilities.push({
       id: facId,
@@ -281,6 +283,15 @@ function normalizeCollectorData(facilitiesById, availabilityById, diagnostics, p
   }
   for (const [facId, daymap] of availabilityById.entries()) {
     for (const [date, daySlots] of Object.entries(daymap || {})) {
+      if (!daySlots?.length) {
+        unavailableDates.push({
+          facilityId: facId,
+          facilityName: facilitiesById.get(facId)?.title || facId,
+          date,
+          reserveUrl: LIST_URL,
+          statusText: "unavailable_or_disabled",
+        });
+      }
       for (const slot of daySlots || []) {
         slots.push({
           facilityId: facId,
@@ -296,7 +307,7 @@ function normalizeCollectorData(facilitiesById, availabilityById, diagnostics, p
       }
     }
   }
-  return ok({ deviceSerial, pageUrl, facilities, slots, diagnostics });
+  return ok({ deviceSerial, pageUrl, facilities, slots, unavailableDates, diagnostics });
 }
 
 async function getJson(url, timeoutMs = 2000) {

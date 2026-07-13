@@ -315,14 +315,29 @@ def _normalize_android_result(payload: dict) -> Dict[str, Any]:
                 normalized_slot[key] = slot.get(key)
         availability.setdefault(raw_id, {}).setdefault(ymd, []).append(normalized_slot)
 
+    for item in payload.get("unavailable_dates") or payload.get("unavailableDates") or []:
+        raw_id = str(item.get("facilityId") or item.get("id") or "").strip()
+        ymd = re.sub(r"\D", "", str(item.get("date") or item.get("ymd") or ""))[:8]
+        if not raw_id or len(ymd) != 8:
+            continue
+        if raw_id not in facilities:
+            facilities[raw_id] = {
+                "title": item.get("facilityName") or item.get("courtName") or raw_id,
+                "location": "?깅궓",
+                "reserveUrl": item.get("reserveUrl") or LIST_URL,
+                "availabilityStatus": "android_chrome_cdp",
+            }
+        availability.setdefault(raw_id, {}).setdefault(ymd, [])
+
     slot_count = sum(len(slots or []) for daymap in availability.values() for slots in daymap.values())
+    checked_date_count = sum(len(daymap or {}) for daymap in availability.values())
     result: Dict[str, Any] = {
         "facilities": facilities,
         "availability": availability,
         "login_required": False,
         "android_status": "ok",
     }
-    if slot_count == 0:
+    if slot_count == 0 and checked_date_count == 0:
         result.update(
             {
                 "partial_failure": True,

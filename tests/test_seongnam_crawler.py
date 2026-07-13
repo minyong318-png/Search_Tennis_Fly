@@ -123,6 +123,19 @@ class SeongnamCrawlerTests(unittest.TestCase):
         self.assertTrue(result["partial_failure"])
         self.assertEqual("network_capture_failed", result["android_status"])
 
+    def test_android_unavailable_dates_are_successful_empty_results(self):
+        payload = {
+            "status": "ok",
+            "facilities": [{"id": "FAC001", "title": "court"}],
+            "slots": [],
+            "unavailable_dates": [{"facilityId": "FAC001", "date": "20260712"}],
+        }
+
+        result = crawl_seongnam._normalize_android_result(payload)
+
+        self.assertNotIn("partial_failure", result)
+        self.assertEqual([], result["availability"]["FAC001"]["20260712"])
+
     @patch.dict("os.environ", {"SEONGNAM_ANDROID_TIMEOUT_MS": "600000"}, clear=False)
     def test_android_collector_timeout_tracks_android_deadline(self):
         self.assertGreaterEqual(crawl_seongnam._android_collector_timeout(), 660)
