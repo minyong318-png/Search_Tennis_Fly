@@ -77,6 +77,28 @@ class RefreshSafeguardTests(unittest.TestCase):
             stamped["facilities"]["rid"]["_crawled_at"],
         )
 
+    def test_frontend_facility_id_whitelist_blocks_unknown_and_anseong(self):
+        import refresh_and_notify
+
+        self.assertTrue(refresh_and_notify.is_frontend_facility_id("yongin:123"))
+        self.assertTrue(refresh_and_notify.is_frontend_facility_id("uiwang:F0001"))
+        self.assertFalse(refresh_and_notify.is_frontend_facility_id("anseong:F0137"))
+        self.assertFalse(refresh_and_notify.is_frontend_facility_id("ggshare:anseong-F0137"))
+        self.assertFalse(refresh_and_notify.is_frontend_facility_id("unknown:123"))
+
+    def test_sent_slot_key_separates_date_and_group(self):
+        import refresh_and_notify
+
+        morning = "09:00 ~ 10:00"
+        self.assertNotEqual(
+            refresh_and_notify.sent_slot_key("용인|A", "20260712", morning),
+            refresh_and_notify.sent_slot_key("용인|A", "20260713", morning),
+        )
+        self.assertNotEqual(
+            refresh_and_notify.sent_slot_key("용인|A", "20260712", morning),
+            refresh_and_notify.sent_slot_key("용인|B", "20260712", morning),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

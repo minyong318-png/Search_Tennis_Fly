@@ -22,6 +22,19 @@ from crawler_diagnostics import run_crawler
 
 LAST_FAILED_PREFIXES: Set[str] = set()
 BLOCKED_FRONTEND_PREFIXES: Tuple[str, ...] = ("anseong:", "ggshare:anseong")
+FRONTEND_ALLOWED_PREFIXES: Tuple[str, ...] = (
+    "yongin:",
+    "goyang:",
+    "suwon:",
+    "seongnam:",
+    "anyang:",
+    "paju:",
+    "hanam:",
+    "uiwang:",
+    "incheon:",
+    "uijeongbu:",
+    "yangpyeong:",
+)
 
 
 # =========================================================
@@ -243,6 +256,30 @@ def slot_key_from_time(t: Any) -> str:
         return time_str
 
     return str(t).strip()
+
+
+def is_frontend_facility_id(fid: Any) -> bool:
+    text = str(fid or "")
+    if not text:
+        return False
+    if any(text.startswith(prefix) for prefix in BLOCKED_FRONTEND_PREFIXES):
+        return False
+    return any(text.startswith(prefix) for prefix in FRONTEND_ALLOWED_PREFIXES)
+
+
+def sent_slot_key(court_group: str, ymd: str, slot_key: str) -> str:
+    """
+    sent_slots 중복 방지 키.
+
+    이전 구현은 시간 문자열만 저장해서 같은 사용자에게 같은 시간대가 다른 날짜나
+    다른 코트 그룹에서 열려도 이미 보낸 것으로 오인할 수 있었다. 알림의 논리 단위인
+    코트 그룹 + 날짜 + 시간으로 분류해 오염을 막는다.
+    """
+    return "|".join([
+        str(court_group or "").strip(),
+        str(ymd or "").strip(),
+        str(slot_key or "").strip(),
+    ])
 
 
 def slot_obj_for_frontend(t: Any, fallback_resve_id: str) -> Dict[str, Any]:
@@ -868,20 +905,28 @@ def prune_stale_prefix_facilities(
     current_facility_ids: Iterable[str],
     min_current_count: int = 1,
     commit: bool = True,
-) -> Tuple[int, int]:
+) -> Tuple[int, int, int]:
     keep_ids = sorted({str(fid) for fid in current_facility_ids if str(fid).startswith(prefix)})
     if len(keep_ids) < min_current_count:
         print(f"[PRUNE] prefix={prefix} skipped: current facility ids too small ({len(keep_ids)}<{min_current_count})")
-        return 0, 0
+        return 0, 0, 0
 
     deleted_cache = 0
     deleted_facilities = 0
+    deleted_snapshots = 0
     with conn.cursor() as cur:
         cur.execute(
             "delete from public.availability_cache where facility_id like %s and not (facility_id = any(%s))",
             (f"{prefix}%", keep_ids),
         )
         deleted_cache = cur.rowcount or 0
+        cur.execute("select to_regclass('public.slots_snapshot')")
+        if cur.fetchone()[0]:
+            cur.execute(
+                "delete from public.slots_snapshot where facility_id like %s and not (facility_id = any(%s))",
+                (f"{prefix}%", keep_ids),
+            )
+            deleted_snapshots = cur.rowcount or 0
         cur.execute(
             "delete from public.facilities where facility_id like %s and not (facility_id = any(%s))",
             (f"{prefix}%", keep_ids),
@@ -889,8 +934,12 @@ def prune_stale_prefix_facilities(
         deleted_facilities = cur.rowcount or 0
     if commit:
         conn.commit()
-    print(f"[PRUNE] prefix={prefix} keep={len(keep_ids)} deleted_facilities={deleted_facilities} deleted_cache={deleted_cache}")
-    return deleted_facilities, deleted_cache
+    print(
+        f"[PRUNE] prefix={prefix} keep={len(keep_ids)} "
+        f"deleted_facilities={deleted_facilities} deleted_cache={deleted_cache} "
+        f"deleted_snapshots={deleted_snapshots}"
+    )
+    return deleted_facilities, deleted_cache, deleted_snapshots
 
 
 def purge_blocked_frontend_prefixes(
@@ -944,6 +993,62 @@ def delete_expired_availability_cache(conn: psycopg.Connection, commit: bool = T
         conn.commit()
     if deleted:
         print(f"[CACHE] expired rows deleted={deleted}")
+    return deleted
+
+
+def cleanup_tracking_tables(
+    conn: psycopg.Connection,
+    snapshot_retention_days: int = 30,
+    sent_retention_days: int = 90,
+    commit: bool = True,
+) -> Dict[str, int]:
+    """
+    크롤링/알림 보조 테이블의 장기 누적을 제한한다.
+
+    - slots_snapshot: 최근 슬롯 변화 확인용이므로 오래된 날짜는 제거
+    - baseline_slots: 지난 날짜 알림 baseline은 더 이상 필요 없음
+    - sent_slots: 재전송 방지용이며 slot_key가 날짜를 포함하므로 장기 보존 불필요
+    """
+    today = yyyymmdd_to_date(kst_today_yyyymmdd())
+    deleted = {"slots_snapshot": 0, "baseline_slots": 0, "sent_slots": 0}
+    with conn.cursor() as cur:
+        cur.execute("select to_regclass('public.slots_snapshot')")
+        if cur.fetchone()[0]:
+            cur.execute(
+                "delete from public.slots_snapshot where date_ymd < %s",
+                (today - timedelta(days=max(1, int(snapshot_retention_days))),),
+            )
+            deleted["slots_snapshot"] = cur.rowcount or 0
+
+        cur.execute("select to_regclass('public.baseline_slots')")
+        if cur.fetchone()[0]:
+            cur.execute(
+                """
+                delete from public.baseline_slots
+                 where replace(coalesce(date, ''), '-', '') ~ '^[0-9]{8}$'
+                   and replace(date, '-', '') < %s
+                """,
+                (kst_today_yyyymmdd(),),
+            )
+            deleted["baseline_slots"] = cur.rowcount or 0
+
+        cur.execute("select to_regclass('public.sent_slots')")
+        if cur.fetchone()[0]:
+            cur.execute(
+                "delete from public.sent_slots where sent_at < now() - (%s::text || ' days')::interval",
+                (str(max(1, int(sent_retention_days))),),
+            )
+            deleted["sent_slots"] = cur.rowcount or 0
+
+    if commit:
+        conn.commit()
+    if any(deleted.values()):
+        print(
+            "[CLEANUP] "
+            f"slots_snapshot={deleted['slots_snapshot']} "
+            f"baseline_slots={deleted['baseline_slots']} "
+            f"sent_slots={deleted['sent_slots']}"
+        )
     return deleted
 
 def clear_availability_cache_for_target(
@@ -1399,11 +1504,11 @@ def main() -> None:
         availability_for_write = {k: v for k, v in availability_for_write.items() if not str(k).startswith("paju:")}
     facilities_for_write = {
         k: v for k, v in facilities_for_write.items()
-        if not any(str(k).startswith(prefix) for prefix in BLOCKED_FRONTEND_PREFIXES)
+        if is_frontend_facility_id(k)
     }
     availability_for_write = {
         k: v for k, v in availability_for_write.items()
-        if not any(str(k).startswith(prefix) for prefix in BLOCKED_FRONTEND_PREFIXES)
+        if is_frontend_facility_id(k)
     }
     excluded_cache_prefixes = []
     if protect_yongin_cache:
@@ -1432,6 +1537,7 @@ def main() -> None:
         # Frontend tables and alarm housekeeping are DB work, so run them after crawling.
         ensure_extra_schema(conn)
         purge_blocked_frontend_prefixes(conn, commit=False)
+        cleanup_tracking_tables(conn, commit=False)
         deleted_alarms = cleanup_expired_alarms(conn)
         if deleted_alarms:
             print(f"[ALARMS] expired deleted={deleted_alarms} (KST<{kst_today_yyyymmdd()})")
@@ -1558,8 +1664,7 @@ def main() -> None:
                     if sk:
                         cur_slots.add(sk)
 
-                        # sent_slots는 slot_key만 저장하니까 같은 사용자에게 같은 슬롯 중복 알림을 막는다.
-                        all_candidate_slot_keys.add(sk)
+                        all_candidate_slot_keys.add(sent_slot_key(baseline_group, ymd, sk))
 
             key_to_current_slots[current_key] = cur_slots
 
@@ -1602,7 +1707,10 @@ def main() -> None:
 
             # 이미 보낸 슬롯 제외
             already_sent = sent_map.get(sid, set())
-            to_send = [sk for sk in sorted(added) if sk not in already_sent]
+            to_send = [
+                sk for sk in sorted(added)
+                if sent_slot_key(baseline_group, ymd, sk) not in already_sent
+            ]
             if not to_send:
                 continue
 
@@ -1622,8 +1730,9 @@ def main() -> None:
 
                 # sent_slots bulk insert를 위해 누적
                 for sk in to_send:
-                    sent_rows.append((sid, sk))
-                    sent_map.setdefault(sid, set()).add(sk)
+                    sent_key = sent_slot_key(baseline_group, ymd, sk)
+                    sent_rows.append((sid, sent_key))
+                    sent_map.setdefault(sid, set()).add(sent_key)
 
             except WebPushException as e:
                 code = getattr(getattr(e, "response", None), "status_code", None)
@@ -1631,7 +1740,7 @@ def main() -> None:
 
         # 11) slots_snapshot 갱신(시설/날짜 단위로는 availability 기준으로 계속 갱신)
         #     (이 테이블은 “원본 슬롯 변화 기록” 용도라 alarms와 별개로 유지 가능)
-        for fid, day_map in (availability or {}).items():
+        for fid, day_map in (availability_for_write or {}).items():
             fid = str(fid)
             for ymd, slots in (day_map or {}).items():
                 if not ymd or len(ymd) != 8:
