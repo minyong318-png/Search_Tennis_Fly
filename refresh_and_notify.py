@@ -21,7 +21,7 @@ import crawl_extra_cities
 from crawler_diagnostics import run_crawler
 
 LAST_FAILED_PREFIXES: Set[str] = set()
-BLOCKED_FRONTEND_PREFIXES: Tuple[str, ...] = ("anseong:", "ggshare:anseong")
+BLOCKED_FRONTEND_PREFIXES: Tuple[str, ...] = ("anseong:", "ggshare:")
 FRONTEND_ALLOWED_PREFIXES: Tuple[str, ...] = (
     "yongin:",
     "goyang:",

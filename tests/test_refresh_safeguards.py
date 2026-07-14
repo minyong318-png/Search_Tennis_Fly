@@ -84,6 +84,7 @@ class RefreshSafeguardTests(unittest.TestCase):
         self.assertTrue(refresh_and_notify.is_frontend_facility_id("uiwang:F0001"))
         self.assertFalse(refresh_and_notify.is_frontend_facility_id("anseong:F0137"))
         self.assertFalse(refresh_and_notify.is_frontend_facility_id("ggshare:anseong-F0137"))
+        self.assertFalse(refresh_and_notify.is_frontend_facility_id("ggshare:uijeongbu-F0003-1130004"))
         self.assertFalse(refresh_and_notify.is_frontend_facility_id("unknown:123"))
 
     def test_sent_slot_key_separates_date_and_group(self):
