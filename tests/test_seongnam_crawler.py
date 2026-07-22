@@ -123,6 +123,19 @@ class SeongnamCrawlerTests(unittest.TestCase):
         self.assertTrue(result["partial_failure"])
         self.assertEqual("network_capture_failed", result["android_status"])
 
+    def test_android_partial_failure_status_preserves_cache(self):
+        payload = {
+            "status": "partial_failure",
+            "message": "Android Chrome page fetch stopped",
+        }
+
+        result = crawl_seongnam._normalize_android_result(payload)
+
+        self.assertEqual({}, result["facilities"])
+        self.assertEqual({}, result["availability"])
+        self.assertTrue(result["partial_failure"])
+        self.assertEqual("PartialFailure", result["error_type"])
+
     def test_android_unavailable_dates_are_successful_empty_results(self):
         payload = {
             "status": "ok",
