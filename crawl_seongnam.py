@@ -29,6 +29,10 @@ ANDROID_FAILURE_ERROR_TYPES = {
     "chrome_tab_not_found": "ChromeTabNotFound",
     "network_capture_failed": "NetworkCaptureFailed",
     "parse_failed": "ParseFailed",
+    "partial_failure": "PartialFailure",
+    "request_timeout": "RequestTimeout",
+    "rate_limited": "RateLimited",
+    "invalid_response": "InvalidResponse",
 }
 
 
