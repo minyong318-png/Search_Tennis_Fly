@@ -68,22 +68,72 @@ class SeongnamAndroidCollectorTests(unittest.TestCase):
         self.assertEqual(8, result["empty"])
         self.assertEqual(5, result["present"])
 
+    def test_android_defaults_are_balanced_when_env_is_missing(self):
+        result = run_node_expr(
+            textwrap.dedent(
+                """
+                import { androidRequestConfig } from './scripts/seongnam_android_collector.mjs';
+                for (const key of [
+                  'SEONGNAM_ANDROID_CONCURRENCY',
+                  'SEONGNAM_ANDROID_BATCH_SIZE',
+                  'SEONGNAM_ANDROID_REQUEST_DELAY_MS',
+                  'SEONGNAM_ANDROID_FETCH_TIMEOUT_MS',
+                  'SEONGNAM_ANDROID_FETCH_RETRIES'
+                ]) delete process.env[key];
+                console.log(JSON.stringify(androidRequestConfig()));
+                """
+            )
+        )
+
+        self.assertEqual(8, result["concurrency"])
+        self.assertEqual(36, result["batchSize"])
+        self.assertEqual(150, result["requestDelayMs"])
+        self.assertEqual(12000, result["fetchTimeoutMs"])
+        self.assertEqual(1, result["fetchRetries"])
+
+    def test_android_env_overrides_balanced_defaults(self):
+        result = run_node_expr(
+            textwrap.dedent(
+                """
+                import { androidRequestConfig, pageFetchEvaluateTimeoutMs } from './scripts/seongnam_android_collector.mjs';
+                process.env.SEONGNAM_ANDROID_CONCURRENCY = '6';
+                process.env.SEONGNAM_ANDROID_BATCH_SIZE = '48';
+                process.env.SEONGNAM_ANDROID_REQUEST_DELAY_MS = '20';
+                process.env.SEONGNAM_ANDROID_FETCH_TIMEOUT_MS = '9000';
+                process.env.SEONGNAM_ANDROID_FETCH_RETRIES = '2';
+                const config = androidRequestConfig();
+                console.log(JSON.stringify({...config, evalTimeout: pageFetchEvaluateTimeoutMs(config)}));
+                """
+            )
+        )
+
+        self.assertEqual(6, result["concurrency"])
+        self.assertEqual(48, result["batchSize"])
+        self.assertEqual(20, result["requestDelayMs"])
+        self.assertEqual(9000, result["fetchTimeoutMs"])
+        self.assertEqual(2, result["fetchRetries"])
+        self.assertEqual(37000, result["evalTimeout"])
+
     def test_selects_non_auto_detect_seongnam_tab(self):
         result = run_node_expr(
             textwrap.dedent(
                 """
-                import { selectSeongnamTab } from './scripts/seongnam_android_collector.mjs';
+                import { selectSeongnamTab, selectSeongnamTabs } from './scripts/seongnam_android_collector.mjs';
                 const tabs = [
                   {url: 'https://res.isdc.co.kr/auto_detect.do', title: 'blocked', webSocketDebuggerUrl: 'ws://bad'},
                   {url: 'https://example.test/', title: 'other', webSocketDebuggerUrl: 'ws://other'},
                   {url: 'https://res.isdc.co.kr/facilityList.do?facType=29', title: '성남 예약', webSocketDebuggerUrl: 'ws://ok'}
                 ];
-                console.log(JSON.stringify(selectSeongnamTab(tabs)));
+                for (let i = 0; i < 30; i += 1) {
+                  tabs.push({url: 'https://res.isdc.co.kr/facilityList.do?facType=29&n=' + i, title: 'old', webSocketDebuggerUrl: 'ws://old' + i});
+                }
+                console.log(JSON.stringify({tab: selectSeongnamTab(tabs), count: selectSeongnamTabs(tabs).length}));
                 """
             )
         )
 
-        self.assertEqual("ws://ok", result["webSocketDebuggerUrl"])
+        self.assertEqual("ws://ok", result["tab"]["webSocketDebuggerUrl"])
+        self.assertLessEqual(result["count"], 12)
 
     def test_detects_when_only_seongnam_tab_is_auto_detect(self):
         result = run_node_expr(
@@ -117,6 +167,56 @@ class SeongnamAndroidCollectorTests(unittest.TestCase):
         self.assertEqual("login_required", result["login"])
         self.assertEqual("automation_blocked", result["blocked"])
         self.assertEqual("ok", result["ok"])
+
+    def test_classifies_fetch_responses_for_blocking_and_rate_limits(self):
+        result = run_node_expr(
+            textwrap.dedent(
+                """
+                import { classifyFetchResponse } from './scripts/seongnam_android_collector.mjs';
+                console.log(JSON.stringify({
+                  forbidden: classifyFetchResponse({status: 403, url: 'https://res.isdc.co.kr/a', contentType: 'text/html', text: ''}, 'html'),
+                  limited: classifyFetchResponse({status: 429, url: 'https://res.isdc.co.kr/a', contentType: 'text/html', text: ''}, 'html'),
+                  blockedHtml: classifyFetchResponse({status: 200, url: 'https://res.isdc.co.kr/auto_detect.do', contentType: 'text/html', text: '<html>abnormal access</html>'}, 'html'),
+                  invalidJson: classifyFetchResponse({status: 200, url: 'https://res.isdc.co.kr/a', contentType: 'text/html', text: '<html>blocked</html>'}, 'json'),
+                  timeout: classifyFetchResponse({status: 0, fetchError: 'AbortError: timeout', url: 'https://res.isdc.co.kr/a'}, 'html'),
+                  ok: classifyFetchResponse({status: 200, url: 'https://res.isdc.co.kr/a', contentType: 'text/html', text: '<input name="groupId" value="1">'}, 'html')
+                }));
+                """
+            )
+        )
+
+        self.assertEqual("automation_blocked", result["forbidden"]["status"])
+        self.assertEqual("rate_limited", result["limited"]["status"])
+        self.assertEqual("automation_blocked", result["blockedHtml"]["status"])
+        self.assertEqual("invalid_response", result["invalidJson"]["status"])
+        self.assertEqual("request_timeout", result["timeout"]["status"])
+        self.assertEqual("ok", result["ok"]["status"])
+
+    def test_adaptive_throttle_reduces_and_recovers_concurrency_by_batch_health(self):
+        result = run_node_expr(
+            textwrap.dedent(
+                """
+                import { AdaptiveThrottle } from './scripts/seongnam_android_collector.mjs';
+                const throttle = new AdaptiveThrottle({ initial: 8, min: 2, max: 8 });
+                const values = [];
+                values.push(throttle.current);
+                throttle.observeBatch([{status: 'ok'}, {status: 'request_timeout'}]);
+                values.push(throttle.current);
+                throttle.observeBatch([{status: 'ok'}, {status: 'automation_blocked'}]);
+                values.push(throttle.current);
+                throttle.observeBatch([{status: 'ok'}, {status: 'ok'}]);
+                values.push(throttle.current);
+                throttle.observeBatch([{status: 'ok'}, {status: 'ok'}]);
+                values.push(throttle.current);
+                throttle.observeBatch([{status: 'ok'}, {status: 'ok'}]);
+                values.push(throttle.current);
+                console.log(JSON.stringify({ values, changes: throttle.changes }));
+                """
+            )
+        )
+
+        self.assertEqual([8, 5, 2, 2, 4, 4], result["values"])
+        self.assertEqual(3, len(result["changes"]))
 
     def test_parses_network_html_and_slots(self):
         result = run_node_expr(

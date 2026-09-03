@@ -11,6 +11,11 @@ const LIST_URL = `${BASE_URL}/facilityList.do?facType=29`;
 const CDP_HOST = "http://127.0.0.1:9222";
 const DEFAULT_PAGE_FETCH_TIMEOUT_MS = 10000;
 const DEFAULT_ANDROID_TIMEOUT_MS = 300000;
+const DEFAULT_ANDROID_CONCURRENCY = 8;
+const DEFAULT_ANDROID_BATCH_SIZE = 36;
+const DEFAULT_ANDROID_REQUEST_DELAY_MS = 150;
+const DEFAULT_ANDROID_FETCH_TIMEOUT_MS = 12000;
+const DEFAULT_ANDROID_FETCH_RETRIES = 1;
 const SENSITIVE_HEADERS = new Set(["cookie", "set-cookie", "authorization", "proxy-authorization"]);
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(SCRIPT_DIR, "..");
@@ -22,6 +27,22 @@ export function numberEnv(name, fallback, min = 0, max = Number.MAX_SAFE_INTEGER
   const raw = Number(value);
   if (!Number.isFinite(raw)) return fallback;
   return Math.max(min, Math.min(raw, max));
+}
+
+export function androidRequestConfig() {
+  return {
+    concurrency: numberEnv("SEONGNAM_ANDROID_CONCURRENCY", DEFAULT_ANDROID_CONCURRENCY, 1, 20),
+    batchSize: numberEnv("SEONGNAM_ANDROID_BATCH_SIZE", DEFAULT_ANDROID_BATCH_SIZE, 1, 1000),
+    requestDelayMs: numberEnv("SEONGNAM_ANDROID_REQUEST_DELAY_MS", DEFAULT_ANDROID_REQUEST_DELAY_MS, 0, 5000),
+    fetchTimeoutMs: numberEnv("SEONGNAM_ANDROID_FETCH_TIMEOUT_MS", DEFAULT_ANDROID_FETCH_TIMEOUT_MS, 1000, 60000),
+    fetchRetries: numberEnv("SEONGNAM_ANDROID_FETCH_RETRIES", DEFAULT_ANDROID_FETCH_RETRIES, 0, 3),
+  };
+}
+
+export function pageFetchEvaluateTimeoutMs(config = androidRequestConfig()) {
+  const timeoutMs = Number(config.fetchTimeoutMs || DEFAULT_ANDROID_FETCH_TIMEOUT_MS);
+  const retries = Number(config.fetchRetries || 0);
+  return Math.max(5000, timeoutMs * (retries + 1) + 10000);
 }
 
 function nowIso() {
@@ -155,13 +176,13 @@ export function selectSeongnamTab(tabs) {
   return selectSeongnamTabs(tabs)[0] || null;
 }
 
-function selectSeongnamTabs(tabs) {
+export function selectSeongnamTabs(tabs) {
   const candidates = (Array.isArray(tabs) ? tabs : []).filter((tab) => {
     const haystack = `${tab?.url || ""} ${tab?.title || ""}`.toLowerCase();
-    return haystack.includes("res.isdc.co.kr") && !String(tab?.url || "").includes("auto_detect.do");
+    return haystack.includes("res.isdc.co.kr") && !String(tab?.url || "").includes("auto_detect.do") && tab?.webSocketDebuggerUrl;
   });
   candidates.sort((a, b) => scoreTab(b) - scoreTab(a));
-  return candidates;
+  return candidates.slice(0, numberEnv("SEONGNAM_ANDROID_MAX_TAB_CANDIDATES", 12, 1, 50));
 }
 
 export function hasOnlyBlockedSeongnamTabs(tabs) {
@@ -203,6 +224,85 @@ export function classifyPage(url, bodyTextOrHtml) {
   }
   if (urlText.includes("res.isdc.co.kr")) return "ok";
   return "chrome_tab_not_found";
+}
+
+export function classifyFetchResponse(response, expectedType = "html") {
+  const status = Number(response?.status || 0);
+  const urlText = String(response?.url || "").toLowerCase();
+  const contentType = String(response?.contentType || "").toLowerCase();
+  const body = String(response?.text || "").toLowerCase();
+  const fetchError = String(response?.fetchError || "").toLowerCase();
+  if (status === 429) return { status: "rate_limited", retryable: true };
+  if (status === 403) return { status: "automation_blocked", retryable: true };
+  if (fetchError) {
+    const timedOut = fetchError.includes("timeout") || fetchError.includes("abort");
+    return { status: timedOut ? "request_timeout" : "partial_failure", retryable: true };
+  }
+  if (urlText.includes("auto_detect.do") || body.includes("鍮꾩젙???묎렐") || body.includes("abnormal access")) {
+    return { status: "automation_blocked", retryable: true };
+  }
+  if (
+    urlText.includes("login.do") ||
+    body.includes("rest_logincheck.do") ||
+    /name=["']web_id["']/.test(body) ||
+    /name=["']web_pw["']/.test(body)
+  ) {
+    return { status: "login_required", retryable: false };
+  }
+  if (status < 200 || status >= 300) return { status: "partial_failure", retryable: true };
+  if (expectedType === "json" && !contentType.includes("json")) return { status: "invalid_response", retryable: true };
+  if (expectedType === "html" && contentType.includes("json") && /^\s*[{[]/.test(body)) {
+    return { status: "invalid_response", retryable: true };
+  }
+  return { status: "ok", retryable: false };
+}
+
+export class AdaptiveThrottle {
+  constructor(options = {}) {
+    this.min = Math.max(1, Number(options.min ?? 2) || 2);
+    this.max = Math.max(this.min, Number(options.max ?? DEFAULT_ANDROID_CONCURRENCY) || DEFAULT_ANDROID_CONCURRENCY);
+    this.current = Math.max(this.min, Math.min(Number(options.initial ?? this.max) || this.max, this.max));
+    this.recoveryStep = Math.max(1, Number(options.recoveryStep ?? 2) || 2);
+    this.goodBatchesForRecovery = Math.max(1, Number(options.goodBatchesForRecovery ?? 2) || 2);
+    this.goodBatchStreak = 0;
+    this.changes = [];
+  }
+
+  observeBatch(classifications) {
+    const values = Array.isArray(classifications) ? classifications : [];
+    const total = values.length || 1;
+    const statuses = values.map((item) => String(item?.status || "ok"));
+    const severe = statuses.some((status) => ["automation_blocked", "rate_limited", "login_required"].includes(status));
+    const failures = statuses.filter((status) => status !== "ok").length;
+    let next = this.current;
+    let reason = "";
+    if (severe) {
+      next = this.min;
+      reason = "blocked_or_rate_limited";
+    } else if (failures >= 2 || failures / total >= 0.2) {
+      next = Math.max(this.min, this.current - 3);
+      reason = "transient_failures";
+    }
+
+    if (reason) {
+      this.goodBatchStreak = 0;
+      this.setCurrent(next, reason);
+      return;
+    }
+
+    this.goodBatchStreak += 1;
+    if (this.goodBatchStreak >= this.goodBatchesForRecovery && this.current < this.max) {
+      this.goodBatchStreak = 0;
+      this.setCurrent(Math.min(this.max, this.current + this.recoveryStep), "healthy_recovery");
+    }
+  }
+
+  setCurrent(next, reason) {
+    const bounded = Math.max(this.min, Math.min(this.max, Number(next) || this.current));
+    if (bounded === this.current) return;
+    this.changes.push({ at: nowIso(), from: this.current, to: bounded, reason });
+    this.current = bounded;
+  }
 }
 
 export function sanitizeHeaders(headers) {
@@ -452,19 +552,16 @@ export async function retryAsync(fn, retries = 1, delayMs = 250) {
   for (let attempt = 0; attempt <= retries; attempt += 1) {
     lastValue = await fn(attempt);
     if (!lastValue?.fetchError) return lastValue;
-    if (attempt < retries && delayMs) await sleep(delayMs);
+    if (attempt < retries && delayMs) await sleep(delayMs + Math.floor(Math.random() * 500));
   }
   return lastValue;
 }
 
 async function pageFetchText(cdp, url, options = {}) {
-  const timeoutMs = numberEnv(
-    "SEONGNAM_ANDROID_FETCH_TIMEOUT_MS",
-    DEFAULT_PAGE_FETCH_TIMEOUT_MS,
-    1000,
-    60000
-  );
-  const retries = numberEnv("SEONGNAM_ANDROID_FETCH_RETRIES", 1, 0, 3);
+  const config = androidRequestConfig();
+  const timeoutMs = config.fetchTimeoutMs;
+  const retries = config.fetchRetries;
+  const evalTimeoutMs = pageFetchEvaluateTimeoutMs(config);
   const optionJson = JSON.stringify({
     method: options.method || "GET",
     credentials: "include",
@@ -488,22 +585,21 @@ async function pageFetchText(cdp, url, options = {}) {
       } finally {
         clearTimeout(timer);
       }
-    })()`
+    })()`,
+      true,
+      evalTimeoutMs
     ),
     retries,
-    250
+    options.retryDelayMs ?? 1500
   );
 }
 
 async function pageFetchManyText(cdp, requests, options = {}) {
-  const timeoutMs = numberEnv(
-    "SEONGNAM_ANDROID_FETCH_TIMEOUT_MS",
-    DEFAULT_PAGE_FETCH_TIMEOUT_MS,
-    1000,
-    60000
-  );
-  const retries = numberEnv("SEONGNAM_ANDROID_FETCH_RETRIES", 1, 0, 3);
-  const concurrency = numberEnv("SEONGNAM_ANDROID_CONCURRENCY", 16, 1, 20);
+  const config = androidRequestConfig();
+  const timeoutMs = config.fetchTimeoutMs;
+  const retries = config.fetchRetries;
+  const concurrency = Math.max(1, Math.min(Number(options.concurrency || config.concurrency) || config.concurrency, 20));
+  const evalTimeoutMs = pageFetchEvaluateTimeoutMs(config);
   const payload = (requests || []).map((request, index) => ({
     index,
     key: request.key ?? index,
@@ -566,21 +662,25 @@ async function pageFetchManyText(cdp, requests, options = {}) {
         }
         await Promise.all(Array.from({ length: Math.min(concurrency, requests.length) }, () => worker()));
         return results;
-      })()`
+      })()`,
+      true,
+      evalTimeoutMs
     ),
     retries,
-    250
+    options.retryDelayMs ?? 1500
   );
 }
 
 async function collectWithPageFetch(cdp, diagnostics) {
   const facilitiesById = new Map();
   const availabilityById = new Map();
+  const requestConfig = androidRequestConfig();
   const daysAhead = Math.max(0, Math.min(Number(process.env.SEONGNAM_DAYS_AHEAD || 2), 45));
   const maxCourts = numberEnv("SEONGNAM_ANDROID_MAX_COURTS", 0, 0, 500);
-  const concurrency = numberEnv("SEONGNAM_ANDROID_CONCURRENCY", 16, 1, 20);
-  const batchSize = numberEnv("SEONGNAM_ANDROID_BATCH_SIZE", 120, 10, 1000);
-  const requestDelayMs = numberEnv("SEONGNAM_ANDROID_REQUEST_DELAY_MS", 0, 0, 5000);
+  const concurrency = requestConfig.concurrency;
+  const batchSize = requestConfig.batchSize;
+  const requestDelayMs = requestConfig.requestDelayMs;
+  const throttle = new AdaptiveThrottle({ initial: concurrency, min: 2, max: concurrency });
   const deadlineMs = Date.now() + numberEnv(
     "SEONGNAM_ANDROID_TIMEOUT_MS",
     DEFAULT_ANDROID_TIMEOUT_MS,
@@ -592,13 +692,27 @@ async function collectWithPageFetch(cdp, diagnostics) {
   const markDeadline = () => {
     diagnostics.deadline_exceeded = true;
   };
+  const failCollection = (status, message) => {
+    const error = new Error(message || status);
+    error.collectorStatus = status;
+    return error;
+  };
   const recordResponse = (response, context = {}) => {
+    const classification = classifyFetchResponse(response, context.expectedType || "html");
     diagnostics.response_count = (diagnostics.response_count || 0) + 1;
+    diagnostics.total_requests = (diagnostics.total_requests || 0) + 1;
+    diagnostics[classification.status] = (diagnostics[classification.status] || 0) + 1;
+    if (classification.status === "ok") diagnostics.success_requests = (diagnostics.success_requests || 0) + 1;
+    else diagnostics.failed_requests = (diagnostics.failed_requests || 0) + 1;
+    if (response?.status === 403) diagnostics.http_403 = (diagnostics.http_403 || 0) + 1;
+    if (response?.status === 429) diagnostics.http_429 = (diagnostics.http_429 || 0) + 1;
+    if (classification.status === "request_timeout") diagnostics.timeout_count = (diagnostics.timeout_count || 0) + 1;
     if (!maxDiagnosticResponses || diagnostics.responses.length < maxDiagnosticResponses) {
       diagnostics.responses.push({
         url: response?.url,
         status: response?.status,
         contentType: response?.contentType,
+        classification: classification.status,
         ...context,
       });
     }
@@ -610,9 +724,13 @@ async function collectWithPageFetch(cdp, diagnostics) {
         ...context,
       });
     }
+    return classification;
   };
   const list = await pageFetchText(cdp, LIST_URL, { headers: { Accept: "text/html,*/*" } });
-  recordResponse(list, { kind: "facility_list" });
+  const listClass = recordResponse(list, { kind: "facility_list", expectedType: "html" });
+  if (["automation_blocked", "rate_limited", "login_required"].includes(listClass.status)) {
+    throw failCollection(listClass.status, `facility_list_${listClass.status}`);
+  }
   if (list.fetchError) throw new Error(`facility_list_fetch_${list.fetchError}`);
   if (!list.ok) throw new Error(`facility_list_http_${list.status}`);
   const groups = parseFacilityListHtml(list.text);
@@ -629,9 +747,12 @@ async function collectWithPageFetch(cdp, diagnostics) {
       headers: { "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8", Accept: "text/html,*/*" },
       body,
     });
-    recordResponse(response, { kind: "court_group", groupId: group.groupId });
-    if (requestDelayMs) await sleep(requestDelayMs);
-    if (response.fetchError || !response.ok) continue;
+    const classification = recordResponse(response, { kind: "court_group", groupId: group.groupId, expectedType: "html" });
+    if (requestDelayMs) await sleep(requestDelayMs + Math.floor(Math.random() * 500));
+    if (["automation_blocked", "rate_limited", "login_required"].includes(classification.status)) {
+      throw failCollection(classification.status, `court_group_${classification.status}`);
+    }
+    if (response.fetchError || !response.ok || classification.status !== "ok") continue;
     for (const court of parseGroupHtml(response.text, group.title)) {
       if (maxCourts && facilitiesById.size >= maxCourts) break;
       facilitiesById.set(court.facId, {
@@ -641,8 +762,12 @@ async function collectWithPageFetch(cdp, diagnostics) {
     }
   }
   diagnostics.courts = facilitiesById.size;
+  diagnostics.initial_concurrency = concurrency;
   diagnostics.concurrency = concurrency;
   diagnostics.batch_size = batchSize;
+  diagnostics.request_delay_ms = requestDelayMs;
+  diagnostics.fetch_timeout_ms = requestConfig.fetchTimeoutMs;
+  diagnostics.fetch_retries = requestConfig.fetchRetries;
   const jobs = [];
   const todayYmd = ymd(0);
   let skippedBySchedule = 0;
@@ -667,6 +792,7 @@ async function collectWithPageFetch(cdp, diagnostics) {
       markDeadline();
       break;
     }
+    const batchStartedAt = Date.now();
     const statusResponses = await pageFetchManyText(
       cdp,
       chunk.map(({ facId, date }) => ({
@@ -674,19 +800,28 @@ async function collectWithPageFetch(cdp, diagnostics) {
         url: `${BASE_URL}/getReservationInfoByDate.do?facId=${encodeURIComponent(facId)}&resdate=${encodeURIComponent(ymdDash(date))}`,
         headers: { Accept: "text/plain,*/*" },
         context: { facId, date },
-      }))
+      })),
+      { concurrency: throttle.current }
     );
+    const classifications = [];
     for (const status of statusResponses) {
       const { facId, date } = status.context || {};
       const daymap = availabilityById.get(facId) || {};
       daymap[date] = [];
       availabilityById.set(facId, daymap);
-      recordResponse(status, { kind: "date_status", facId, date });
-      if (status.fetchError || !status.ok) continue;
+      const classification = recordResponse(status, { kind: "date_status", facId, date, expectedType: "html" });
+      classifications.push(classification);
+      if (["automation_blocked", "rate_limited", "login_required"].includes(classification.status)) {
+        throw failCollection(classification.status, `date_status_${classification.status}`);
+      }
+      if (status.fetchError || !status.ok || classification.status !== "ok") continue;
       if (["closed", "empty", "full"].includes(String(status.text || "").trim().toLowerCase())) continue;
       tableJobs.push({ facId, date });
     }
-    if (requestDelayMs) await sleep(requestDelayMs);
+    throttle.observeBatch(classifications);
+    diagnostics.batch_timings ||= [];
+    diagnostics.batch_timings.push({ kind: "date_status", requests: chunk.length, ms: Date.now() - batchStartedAt, concurrency: throttle.current });
+    if (requestDelayMs) await sleep(requestDelayMs + Math.floor(Math.random() * 500));
   }
   diagnostics.table_candidates = tableJobs.length;
   for (const chunk of chunkArray(tableJobs, batchSize)) {
@@ -694,6 +829,7 @@ async function collectWithPageFetch(cdp, diagnostics) {
       markDeadline();
       break;
     }
+    const batchStartedAt = Date.now();
     const tableResponses = await pageFetchManyText(
       cdp,
       chunk.map(({ facId, date }) => ({
@@ -703,12 +839,18 @@ async function collectWithPageFetch(cdp, diagnostics) {
         headers: { "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8", Accept: "text/html,*/*" },
         body: new URLSearchParams({ facId, resdate: ymdDash(date) }).toString(),
         context: { facId, date },
-      }))
+      })),
+      { concurrency: throttle.current }
     );
+    const classifications = [];
     for (const table of tableResponses) {
       const { facId, date } = table.context || {};
-      recordResponse(table, { kind: "time_table", facId, date });
-      if (table.fetchError || !table.ok) continue;
+      const classification = recordResponse(table, { kind: "time_table", facId, date, expectedType: "html" });
+      classifications.push(classification);
+      if (["automation_blocked", "rate_limited", "login_required"].includes(classification.status)) {
+        throw failCollection(classification.status, `time_table_${classification.status}`);
+      }
+      if (table.fetchError || !table.ok || classification.status !== "ok") continue;
       const daymap = availabilityById.get(facId) || {};
       daymap[date] = parseTimetableHtml(table.text).map((slot) => ({
         ...slot,
@@ -716,8 +858,13 @@ async function collectWithPageFetch(cdp, diagnostics) {
       }));
       availabilityById.set(facId, daymap);
     }
-    if (requestDelayMs) await sleep(requestDelayMs);
+    throttle.observeBatch(classifications);
+    diagnostics.batch_timings ||= [];
+    diagnostics.batch_timings.push({ kind: "time_table", requests: chunk.length, ms: Date.now() - batchStartedAt, concurrency: throttle.current });
+    if (requestDelayMs) await sleep(requestDelayMs + Math.floor(Math.random() * 500));
   }
+  diagnostics.final_concurrency = throttle.current;
+  diagnostics.concurrency_changes = throttle.changes;
   return { facilitiesById, availabilityById };
 }
 
@@ -873,6 +1020,15 @@ export async function collectAndroid() {
       diagnostics.page_fetch = true;
       diagnostics.network_capture = diagnostics.responses.length > 0;
     } catch (error) {
+      if (error.collectorStatus) {
+        diagnostics.page_fetch_error = error.message;
+        diagnostics.protected_existing_data = true;
+        return fail(error.collectorStatus, `Android Chrome page fetch stopped: ${error.message}`, {
+          device_serial: maskSerial(device.serial),
+          page_url: pageUrl,
+          diagnostics,
+        });
+      }
       diagnostics.page_fetch_error = error.message;
       collected = await collectDomFallback(cdp);
       diagnostics.dom_fallback = true;
@@ -883,6 +1039,14 @@ export async function collectAndroid() {
     );
     diagnostics.slots = slotCount;
     if (!collected.facilitiesById.size) {
+      if (diagnostics.page_fetch_error) {
+        diagnostics.protected_existing_data = true;
+        return fail("partial_failure", "Android Chrome page fetch did not complete; keep existing Seongnam data", {
+          device_serial: maskSerial(device.serial),
+          page_url: pageUrl,
+          diagnostics,
+        });
+      }
       return fail("parse_failed", "성남 시설 또는 코트 정보를 추출하지 못했습니다.", {
         device_serial: maskSerial(device.serial),
         page_url: pageUrl,

@@ -84,17 +84,30 @@ try {
     exit 2
   }
 
-  & $adb shell am start -a android.intent.action.VIEW -d "https://res.isdc.co.kr/facilityList.do?facType=29" com.android.chrome | Out-Host
-  Start-Sleep -Seconds 3
   & $adb forward "tcp:$Port" "localabstract:chrome_devtools_remote" | Out-Host
+  $tabsJson = ""
+  try {
+    $tabsJson = (Invoke-WebRequest -UseBasicParsing "http://127.0.0.1:$Port/json" -TimeoutSec 2).Content
+  } catch {
+    $tabsJson = ""
+  }
+  $hasHealthySeongnamTab = $tabsJson -match "res\.isdc\.co\.kr" -and $tabsJson -notmatch "auto_detect\.do"
+  if (-not $hasHealthySeongnamTab) {
+    Write-Host "[SEONGNAM][ANDROID] opening Seongnam reservation page in Chrome"
+    & $adb shell am start -a android.intent.action.VIEW -d "https://res.isdc.co.kr/facilityList.do?facType=29" com.android.chrome | Out-Host
+    Start-Sleep -Seconds 3
+  } else {
+    Write-Host "[SEONGNAM][ANDROID] reusing existing Seongnam Chrome tab"
+  }
   $env:RUN_TARGET = "seongnam"
   $env:SEONGNAM_COLLECTOR_MODE = "android"
   if (-not $env:SEONGNAM_DAYS_AHEAD) { $env:SEONGNAM_DAYS_AHEAD = "2" }
   if (-not $env:SEONGNAM_ANDROID_TIMEOUT_MS) { $env:SEONGNAM_ANDROID_TIMEOUT_MS = "600000" }
   if (-not $env:SEONGNAM_ANDROID_RUN_TIMEOUT) { $env:SEONGNAM_ANDROID_RUN_TIMEOUT = "900" }
-  if (-not $env:SEONGNAM_ANDROID_FETCH_TIMEOUT_MS) { $env:SEONGNAM_ANDROID_FETCH_TIMEOUT_MS = "10000" }
-  if (-not $env:SEONGNAM_ANDROID_CONCURRENCY) { $env:SEONGNAM_ANDROID_CONCURRENCY = "16" }
-  if (-not $env:SEONGNAM_ANDROID_BATCH_SIZE) { $env:SEONGNAM_ANDROID_BATCH_SIZE = "120" }
+  if (-not $env:SEONGNAM_ANDROID_FETCH_TIMEOUT_MS) { $env:SEONGNAM_ANDROID_FETCH_TIMEOUT_MS = "12000" }
+  if (-not $env:SEONGNAM_ANDROID_CONCURRENCY) { $env:SEONGNAM_ANDROID_CONCURRENCY = "8" }
+  if (-not $env:SEONGNAM_ANDROID_BATCH_SIZE) { $env:SEONGNAM_ANDROID_BATCH_SIZE = "36" }
+  if (-not $env:SEONGNAM_ANDROID_REQUEST_DELAY_MS) { $env:SEONGNAM_ANDROID_REQUEST_DELAY_MS = "150" }
   if (-not $env:SEONGNAM_ANDROID_FETCH_RETRIES) { $env:SEONGNAM_ANDROID_FETCH_RETRIES = "1" }
   & $Python refresh_and_notify.py
   exit $LASTEXITCODE
