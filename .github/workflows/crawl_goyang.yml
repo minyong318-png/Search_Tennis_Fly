@@ -17,27 +17,31 @@ concurrency:
 
 jobs:
   run:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
+    runs-on: [self-hosted, Windows, X64, tennis-local]
+    timeout-minutes: 360
 
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-          cache: "pip"
-
       - name: Install deps
+        shell: powershell
         run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          $python = "$env:LOCALAPPDATA\Programs\Python\Python311\python.exe"
+          if (-not (Test-Path $python)) { $python = "python" }
+          & $python --version
+          & $python -m pip install --upgrade pip
+          & $python -m pip install -r requirements.txt
 
       - name: Refresh Korean gov SSL pins
         continue-on-error: true
-        run: python fetch_korea_gov_certs.py
+        shell: powershell
+        run: |
+          $python = "$env:LOCALAPPDATA\Programs\Python\Python311\python.exe"
+          if (-not (Test-Path $python)) { $python = "python" }
+          & $python fetch_korea_gov_certs.py
 
       - name: Run refresh (Goyang)
+        shell: powershell
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           RUN_TARGET: "goyang"
@@ -47,11 +51,15 @@ jobs:
           GYT_PROXY_URL: ${{ secrets.GYT_PROXY_URL }}
           GYS_ID: ${{ secrets.GYS_ID }}
           GYS_PW: ${{ secrets.GYS_PW }}
+          GYT_TAILSCALE_EXIT_NODE: ""
+          CRAWL_TAILSCALE_EXIT_NODE: ""
           VAPID_PUBLIC_KEY: ${{ secrets.VAPID_PUBLIC_KEY }}
           VAPID_PRIVATE_KEY: ${{ secrets.VAPID_PRIVATE_KEY }}
           VAPID_SUBJECT: ${{ secrets.VAPID_SUBJECT }}
         run: |
-          python refresh_and_notify.py
+          $python = "$env:LOCALAPPDATA\Programs\Python\Python311\python.exe"
+          if (-not (Test-Path $python)) { $python = "python" }
+          .\scripts\run_local_refresh.ps1 -Target goyang -Python $python
 
       - name: Upload gytennis debug artifact
         if: always()
