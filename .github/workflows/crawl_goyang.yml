@@ -23,13 +23,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Connect to Tailscale
-        uses: tailscale/github-action@v4
-        continue-on-error: true
-        with:
-          authkey: ${{ secrets.TAILSCALE_AUTHKEY }}
-          ping: 100.120.193.30
-
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -49,7 +42,6 @@ jobs:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           RUN_TARGET: "goyang"
           FORCE_GOYANG_CRAWL: ${{ inputs.force }}
-          GYT_TAILSCALE_EXIT_NODE: "100.120.193.30"
           GYT_USE_CURL_CFFI: "1"
           GYT_DEBUG_DUMP: "1"
           GYT_PROXY_URL: ${{ secrets.GYT_PROXY_URL }}
