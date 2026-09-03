@@ -21,6 +21,16 @@ except Exception:
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
+
+def _is_ssl_error(exc: BaseException) -> bool:
+    """Treat curl_cffi's certificate errors like requests SSL errors."""
+    error_types = [requests.exceptions.SSLError]
+    curl_exceptions = getattr(curl_requests, "exceptions", None)
+    curl_ssl_error = getattr(curl_exceptions, "SSLError", None)
+    if isinstance(curl_ssl_error, type):
+        error_types.append(curl_ssl_error)
+    return isinstance(exc, tuple(error_types))
+
 UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -307,7 +317,9 @@ def fetch_gytennis_day(
 
     try:
         r = _fetch_via_form(use_insecure)
-    except requests.exceptions.SSLError as e:
+    except Exception as e:
+        if not _is_ssl_error(e):
+            raise
         if ssl_fallback_state is not None:
             ssl_fallback_state["use_insecure"] = True
         print(f"[GYT][SSL_WARN] switch to verify=False for gytennis session: first_fail cv={courtvalue} date={ymd} err={e}")
@@ -329,7 +341,9 @@ def fetch_gytennis_day(
                     html = html3
                 else:
                     return {}
-        except requests.exceptions.SSLError:
+        except Exception as e:
+            if not _is_ssl_error(e):
+                raise
             if ssl_fallback_state is not None:
                 ssl_fallback_state["use_insecure"] = True
             r2 = _get(url, True)
@@ -352,7 +366,9 @@ def fetch_gytennis_day(
     for u in (url, url_alt):
         try:
             rr = _get(u, bool((ssl_fallback_state or {}).get("use_insecure")))
-        except requests.exceptions.SSLError:
+        except Exception as e:
+            if not _is_ssl_error(e):
+                raise
             if ssl_fallback_state is not None:
                 ssl_fallback_state["use_insecure"] = True
             rr = _get(u, True)
