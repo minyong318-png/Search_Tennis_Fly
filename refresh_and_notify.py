@@ -21,6 +21,7 @@ import crawl_extra_cities
 from crawler_diagnostics import run_crawler
 
 LAST_FAILED_PREFIXES: Set[str] = set()
+YONGIN_FACILITY_LIST_PARTIAL_FAILURE = False
 BLOCKED_FRONTEND_PREFIXES: Tuple[str, ...] = ("anseong:", "ggshare:")
 FRONTEND_ALLOWED_PREFIXES: Tuple[str, ...] = (
     "yongin:",
@@ -307,6 +308,58 @@ def slot_obj_for_frontend(t: Any, fallback_resve_id: str) -> Dict[str, Any]:
     return {"timeContent": slot_key_from_time(t), "resveId": fallback_resve_id}
 
 
+def filter_publishable_slots(slots: Iterable[Any]) -> List[Any]:
+    """Keep only slots whose source explicitly does not mark them unavailable."""
+    return tennis_core.filter_publishable_slots(slots)
+
+
+def _normalized_ymd(value: Any) -> str:
+    text = str(value or "").strip().replace(".", "-").replace("/", "-")
+    return text.replace("-", "")
+
+
+def _date_in_range_yyyymmdd(ymd: str, start: Any, end: Any) -> bool:
+    value = _normalized_ymd(ymd)
+    lower = _normalized_ymd(start)
+    upper = _normalized_ymd(end)
+    return bool(value) and (not lower or value >= lower) and (not upper or value <= upper)
+
+
+def alarm_slot_is_current(meta: Any, ymd: str, slot: Any, facility_id: str = "") -> bool:
+    """Apply the same status/date/time guards to in-memory alarm candidates."""
+    if not tennis_core.is_publishable_slot(slot) or not isinstance(meta, dict):
+        return False
+    if _normalized_ymd(ymd) < kst_today_yyyymmdd():
+        return False
+    status = tennis_core.normalize_application_status(
+        meta.get("applicationStatus")
+        or meta.get("application_status")
+        or meta.get("applicationStatusLabel")
+        or meta.get("application_status_label")
+    )
+    if status in {"closed", "not_open"}:
+        return False
+    if str(facility_id).startswith("yongin:") and status != "open":
+        return False
+    failed_dates = {_normalized_ymd(value) for value in (meta.get("_failed_dates") or [])}
+    if _normalized_ymd(ymd) in failed_dates:
+        return False
+    status_by_date = meta.get("_availability_status_by_date") or meta.get("availability_status_by_date") or {}
+    availability_status = str(status_by_date.get(ymd) or status_by_date.get(_normalized_ymd(ymd)) or "available")
+    if availability_status != "available":
+        return False
+    if not _date_in_range_yyyymmdd(ymd, meta.get("useStartDate") or meta.get("use_start_date"), meta.get("useEndDate") or meta.get("use_end_date")):
+        return False
+    if _normalized_ymd(ymd) == kst_today_yyyymmdd():
+        match = re.search(r"(\d{1,2}):(\d{2})", slot_key_from_time(slot))
+        if match:
+            start_minutes = int(match.group(1)) * 60 + int(match.group(2))
+            now = datetime.now(KST)
+            if start_minutes <= now.hour * 60 + now.minute:
+                return False
+    return True
+
+
 # =========================================================
 # DB schema (추가/조회용만: 기존 테이블은 건드리지 않음)
 # =========================================================
@@ -316,6 +369,16 @@ create table if not exists public.facilities (
   facility_id text primary key,
   title text not null,
   location text,
+  reservation_type text not null default 'unknown',
+  reservation_type_label text not null default '유형 확인 필요',
+  application_status text not null default 'unknown',
+  application_status_label text not null default '상태 확인 필요',
+  application_start_date date,
+  application_end_date date,
+  use_start_date date,
+  use_end_date date,
+  source_url text,
+  metadata_checked_at timestamptz,
   updated_at timestamptz not null default now()
 );
 
@@ -324,9 +387,34 @@ create table if not exists public.availability_cache (
   facility_id text not null references public.facilities(facility_id) on delete cascade,
   date_ymd date not null,
   slots_json jsonb not null default '[]'::jsonb,
+  query_status text not null default 'success',
+  availability_status text not null default 'unknown',
+  checked_at timestamptz,
   updated_at timestamptz not null default now(),
   primary key (facility_id, date_ymd)
 );
+
+alter table if exists public.facilities add column if not exists reservation_type text not null default 'unknown';
+alter table if exists public.facilities add column if not exists reservation_type_label text not null default '유형 확인 필요';
+alter table if exists public.facilities add column if not exists application_status text not null default 'unknown';
+alter table if exists public.facilities add column if not exists application_status_label text not null default '상태 확인 필요';
+alter table if exists public.facilities add column if not exists application_start_date date;
+alter table if exists public.facilities add column if not exists application_end_date date;
+alter table if exists public.facilities add column if not exists use_start_date date;
+alter table if exists public.facilities add column if not exists use_end_date date;
+alter table if exists public.facilities add column if not exists source_url text;
+alter table if exists public.facilities add column if not exists metadata_checked_at timestamptz;
+alter table if exists public.availability_cache add column if not exists query_status text not null default 'success';
+alter table if exists public.availability_cache add column if not exists availability_status text not null default 'unknown';
+alter table if exists public.availability_cache add column if not exists checked_at timestamptz;
+update public.availability_cache
+   set checked_at = coalesce(checked_at, updated_at),
+       availability_status = case
+         when jsonb_typeof(slots_json) <> 'array' then 'confirmed_empty'
+         when jsonb_array_length(slots_json) > 0 then 'available'
+         else 'confirmed_empty'
+       end
+ where checked_at is null or availability_status = 'unknown';
 
 create index if not exists idx_avcache_date on public.availability_cache(date_ymd);
 
@@ -350,6 +438,18 @@ def ensure_extra_schema(conn: psycopg.Connection) -> None:
 
 def _ns_yongin_id(rid: str) -> str:
     return f"yongin:{rid}"
+
+
+def _crawl_yongin_for_refresh() -> Dict[str, Any]:
+    facilities, availability = tennis_core.run_all()
+    return {
+        "facilities": facilities,
+        "availability": availability,
+        "partial_failure": bool(
+            tennis_core.CRAWL_STATS.get("facility_list_failed", 0)
+            and facilities
+        ),
+    }
 
 def _ns_goyang_id(kind: str, key: str) -> str:
     # kind: "gytennis" / "daehwa"
@@ -468,8 +568,10 @@ def crawl_all() -> Tuple[Dict[str, Any], Dict[str, Dict[str, List[Any]]]]:
     ✅ RUN_TARGET
       - yongin / goyang / suwon / seongnam / anyang / paju / hanam / uiwang / incheon / all
     """
+    global YONGIN_FACILITY_LIST_PARTIAL_FAILURE
     target = (os.getenv("RUN_TARGET") or "all").strip().lower()
     LAST_FAILED_PREFIXES.clear()
+    YONGIN_FACILITY_LIST_PARTIAL_FAILURE = False
 
     facilities: Dict[str, Any] = {}
     availability: Dict[str, Dict[str, List[Any]]] = {}
@@ -484,11 +586,13 @@ def crawl_all() -> Tuple[Dict[str, Any], Dict[str, Dict[str, List[Any]]]]:
                 "yongin",
                 "publicsports",
                 tennis_core.BASE_URL,
-                lambda: dict(zip(("facilities", "availability"), tennis_core.run_all())),
+                _crawl_yongin_for_refresh,
             ))
             y_fac, y_av = y_out.get("facilities", {}), y_out.get("availability", {})
         finally:
             set_crawl_exit_node("YONGIN", False)
+
+        YONGIN_FACILITY_LIST_PARTIAL_FAILURE = bool(y_out.get("partial_failure"))
 
         for rid, meta in (y_fac or {}).items():
             rid = str(rid)
@@ -823,10 +927,41 @@ def upsert_facilities_for_frontend(conn: psycopg.Connection, facilities: Dict[st
             title = v.get("title") or v.get("name") or v.get("facility_name") or f"RID {fid}"
             location = v.get("location") or ""
             row_ts = _parse_crawled_at(v.get("_crawled_at")) or ts
+            reservation_type = v.get("reservationType") or v.get("reservation_type") or "unknown"
+            reservation_type_label = v.get("reservationTypeLabel") or v.get("reservation_type_label") or "유형 확인 필요"
+            application_status = v.get("applicationStatus") or v.get("application_status") or "unknown"
+            application_status_label = v.get("applicationStatusLabel") or v.get("application_status_label") or "상태 확인 필요"
+            application_start = v.get("applicationStartDate") or v.get("application_start_date") or None
+            application_end = v.get("applicationEndDate") or v.get("application_end_date") or None
+            use_start = v.get("useStartDate") or v.get("use_start_date") or None
+            use_end = v.get("useEndDate") or v.get("use_end_date") or None
+            source_url = v.get("sourceUrl") or v.get("source_url") or v.get("reserveUrl") or None
         else:
             title = str(v) if v is not None else f"RID {fid}"
             location = ""
-        rows.append((fid, title, location, row_ts))
+            reservation_type = "unknown"
+            reservation_type_label = "유형 확인 필요"
+            application_status = "unknown"
+            application_status_label = "상태 확인 필요"
+            application_start = application_end = use_start = use_end = source_url = None
+        rows.append(
+            (
+                fid,
+                title,
+                location,
+                reservation_type,
+                reservation_type_label,
+                application_status,
+                application_status_label,
+                application_start,
+                application_end,
+                use_start,
+                use_end,
+                source_url,
+                row_ts,
+                row_ts,
+            )
+        )
 
     if not rows:
         return
@@ -834,10 +969,28 @@ def upsert_facilities_for_frontend(conn: psycopg.Connection, facilities: Dict[st
     with conn.cursor() as cur:
         cur.executemany(
             """
-            insert into public.facilities (facility_id, title, location, updated_at)
-            values (%s, %s, %s, %s)
+            insert into public.facilities (
+                facility_id, title, location, reservation_type, reservation_type_label,
+                application_status, application_status_label, application_start_date,
+                application_end_date, use_start_date, use_end_date, source_url,
+                metadata_checked_at, updated_at
+            )
+            values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             on conflict (facility_id)
-            do update set title=excluded.title, location=excluded.location, updated_at=excluded.updated_at
+            do update set
+                title=excluded.title,
+                location=excluded.location,
+                reservation_type=excluded.reservation_type,
+                reservation_type_label=excluded.reservation_type_label,
+                application_status=excluded.application_status,
+                application_status_label=excluded.application_status_label,
+                application_start_date=excluded.application_start_date,
+                application_end_date=excluded.application_end_date,
+                use_start_date=excluded.use_start_date,
+                use_end_date=excluded.use_end_date,
+                source_url=excluded.source_url,
+                metadata_checked_at=excluded.metadata_checked_at,
+                updated_at=excluded.updated_at
             """,
             rows,
         )
@@ -1058,6 +1211,7 @@ def clear_availability_cache_for_target(
     end_yyyymmdd: str,
     keep_yongin_today: bool = False,
     exclude_prefixes: Iterable[str] = (),
+    exclude_facility_ids: Iterable[str] = (),
     commit: bool = True,
 ) -> None:
     """
@@ -1111,10 +1265,15 @@ def clear_availability_cache_for_target(
         if keep_yongin_today:
             # 용인 당일 데이터는 전날 말미(23:59 근접) 스냅샷을 유지한다.
             extra_guard = " and not (facility_id like %s and date_ymd = %s)"
+        excluded_ids = tuple(str(fid) for fid in exclude_facility_ids if fid)
+        if excluded_ids:
+            extra_guard += " and not (facility_id = any(%s))"
         params = [d1, d2, *prefixes]
         if keep_yongin_today:
             params.append("yongin:%")
             params.append(today_d)
+        if excluded_ids:
+            params.append(list(excluded_ids))
         cur.execute(
             f"""
             update public.availability_cache
@@ -1142,15 +1301,30 @@ def upsert_availability_cache_for_frontend(
     """
     ts = utcnow()
     rows = []
+    failed_rows = []
 
     today_ymd = kst_today_yyyymmdd()
 
-    for fid, day_map in availability.items():
-        fid = str(fid)
+    facility_ids = {str(fid) for fid in (availability or {}).keys()}
+    facility_ids.update(
+        str(fid)
+        for fid, meta in (facilities or {}).items()
+        if isinstance(meta, dict) and meta.get("_failed_dates")
+    )
+
+    for fid in sorted(facility_ids):
+        day_map = (availability or {}).get(fid) or {}
         facility_meta = facilities.get(fid) if isinstance(facilities, dict) else None
         row_ts = ts
         if isinstance(facility_meta, dict):
             row_ts = _parse_crawled_at(facility_meta.get("_crawled_at")) or ts
+            failed_dates = {
+                str(value).strip()
+                for value in (facility_meta.get("_failed_dates") or [])
+                if str(value).strip()
+            }
+        else:
+            failed_dates = set()
         for ymd, slots in (day_map or {}).items():
             ymd = (ymd or "").strip()
             if len(ymd) != 8:
@@ -1164,22 +1338,89 @@ def upsert_availability_cache_for_frontend(
             # 최소한 "시설 id로 링크 생성"도 가능하게 fallback 처리
             fallback_resve_id = _strip_yongin_resve_id(fid)
 
-            arr = [slot_obj_for_frontend(s, fallback_resve_id) for s in (slots or []) if slot_key_from_time(s)]
-            rows.append((fid, d, json.dumps(arr, ensure_ascii=False), row_ts))
+            arr = [
+                slot_obj_for_frontend(s, fallback_resve_id)
+                for s in filter_publishable_slots(slots)
+                if slot_key_from_time(s)
+            ]
+            status_by_date = {}
+            if isinstance(facility_meta, dict):
+                status_by_date = (
+                    facility_meta.get("_availability_status_by_date")
+                    or facility_meta.get("availability_status_by_date")
+                    or {}
+                )
+            availability_status = status_by_date.get(ymd) or ("available" if arr else "confirmed_empty")
+            rows.append(
+                (
+                    fid,
+                    d,
+                    json.dumps(arr, ensure_ascii=False),
+                    row_ts,
+                    "success",
+                    availability_status,
+                    row_ts,
+                )
+            )
 
-    if not rows:
+        # Keep the last successful slots for a failed unit, but publish the
+        # failed query status so the public reader never treats that snapshot
+        # as current. If no previous row exists, create a blocked empty row.
+        for ymd in sorted(failed_dates):
+            if len(ymd) != 8 or not ymd.isdigit():
+                continue
+            if keep_yongin_today and fid.startswith("yongin:") and ymd == today_ymd:
+                continue
+            failed_rows.append(
+                (
+                    fid,
+                    yyyymmdd_to_date(ymd),
+                    "[]",
+                    ts,
+                    "failed",
+                    "unknown",
+                    None,
+                )
+            )
+
+    if not rows and not failed_rows:
         return
 
     with conn.cursor() as cur:
-        cur.executemany(
-            """
-            insert into public.availability_cache (facility_id, date_ymd, slots_json, updated_at)
-            values (%s, %s, %s::jsonb, %s)
-            on conflict (facility_id, date_ymd)
-            do update set slots_json=excluded.slots_json, updated_at=excluded.updated_at
-            """,
-            rows,
-        )
+        if rows:
+            cur.executemany(
+                """
+                insert into public.availability_cache (
+                    facility_id, date_ymd, slots_json, updated_at,
+                    query_status, availability_status, checked_at
+                )
+                values (%s, %s, %s::jsonb, %s, %s, %s, %s)
+                on conflict (facility_id, date_ymd)
+                do update set
+                    slots_json=excluded.slots_json,
+                    updated_at=excluded.updated_at,
+                    query_status=excluded.query_status,
+                    availability_status=excluded.availability_status,
+                    checked_at=excluded.checked_at
+                """,
+                rows,
+            )
+        if failed_rows:
+            cur.executemany(
+                """
+                insert into public.availability_cache (
+                    facility_id, date_ymd, slots_json, updated_at,
+                    query_status, availability_status, checked_at
+                )
+                values (%s, %s, %s::jsonb, %s, %s, %s, %s)
+                on conflict (facility_id, date_ymd)
+                do update set
+                    updated_at=excluded.updated_at,
+                    query_status='failed',
+                    availability_status='unknown'
+                """,
+                failed_rows,
+            )
     if commit:
         conn.commit()
 
@@ -1400,6 +1641,15 @@ def count_slots_for_prefix(availability: Dict[str, Dict[str, List[Any]]], prefix
     return total
 
 
+def failed_facility_ids(facilities: Dict[str, Any]) -> Set[str]:
+    """Return only facility/date units whose time query failed this run."""
+    return {
+        str(fid)
+        for fid, meta in (facilities or {}).items()
+        if isinstance(meta, dict) and meta.get("_failed_dates")
+    }
+
+
 def should_protect_cache(slot_count: int, partial_failure: bool = False, protect_zero_slots: bool = True) -> bool:
     return bool(partial_failure) or (protect_zero_slots and slot_count == 0)
 
@@ -1443,22 +1693,26 @@ def main() -> None:
 
     # ✅ 이번 실행 타겟/기간에 해당하는 캐시를 먼저 비워두고(빈 배열),
     #    아래 upsert에서 다시 채운다.
-    goyang_slots = count_slots_for_prefix(availability, "goyang:gytennis:")
     goyang_partial_failure = bool(getattr(crawl_goyang, "LAST_PARTIAL_FAILURE", False))
-    protect_goyang_cache = target in ("all", "goyang") and (goyang_slots == 0 or goyang_partial_failure)
+    protect_goyang_cache = target in ("all", "goyang") and (
+        goyang_partial_failure
+        or not any(str(fid).startswith("goyang:") for fid in facilities)
+    )
     if protect_goyang_cache:
-        reason = "partial_failure" if goyang_partial_failure else "gytennis slots=0"
+        reason = "partial_failure" if goyang_partial_failure else "facility_list_empty"
         print(f"[GOYANG][SAFEGUARD] {reason}; keep existing goyang cache")
 
-    suwon_slots = count_slots_for_prefix(availability, "suwon:")
-    protect_suwon_cache = target in ("all", "suwon") and suwon_slots == 0
+    protect_suwon_cache = target in ("all", "suwon") and not any(
+        str(fid).startswith("suwon:") for fid in facilities
+    )
     if protect_suwon_cache:
-        print("[SUWON][SAFEGUARD] slots=0; keep existing suwon cache")
+        print("[SUWON][SAFEGUARD] facility_list_empty; keep existing suwon cache")
 
-    seongnam_slots = count_slots_for_prefix(availability, "seongnam:")
-    protect_seongnam_cache = target in ("all", "seongnam") and seongnam_slots == 0
+    seongnam_partial_failure = "seongnam:" in LAST_FAILED_PREFIXES
+    protect_seongnam_cache = target in ("all", "seongnam") and seongnam_partial_failure
     if protect_seongnam_cache:
-        print("[SEONGNAM][SAFEGUARD] slots=0; keep existing seongnam cache")
+        reason = "partial_failure"
+        print(f"[SEONGNAM][SAFEGUARD] {reason}; keep existing seongnam cache")
 
     anyang_slots = count_slots_for_prefix(availability, "anyang:")
     anyang_partial_failure = bool(getattr(crawl_anyang, "LAST_PARTIAL_FAILURE", False))
@@ -1480,11 +1734,12 @@ def main() -> None:
     if protect_paju_cache:
         print("[PAJU][SAFEGUARD] partial_failure; keep existing paju cache")
 
-    yongin_failed_dates = int(getattr(tennis_core, "CRAWL_STATS", {}).get("time_failed", 0) or 0)
-    yongin_slots = count_slots_for_prefix(availability, "yongin:")
-    protect_yongin_cache = target in ("all", "yongin") and (yongin_failed_dates > 0 or yongin_slots == 0)
+    yongin_facility_list_empty = not any(str(fid).startswith("yongin:") for fid in facilities)
+    protect_yongin_cache = target in ("all", "yongin") and (
+        yongin_facility_list_empty or "yongin:" in LAST_FAILED_PREFIXES
+    )
     if protect_yongin_cache:
-        reason = f"failed_dates={yongin_failed_dates}" if yongin_failed_dates > 0 else "slots=0"
+        reason = "facility_list_empty" if yongin_facility_list_empty else "partial_failure"
         print(f"[YONGIN][SAFEGUARD] {reason}; keep existing yongin cache")
 
     facilities_for_write = facilities
@@ -1524,6 +1779,7 @@ def main() -> None:
     if protect_paju_cache:
         excluded_cache_prefixes.append("paju:")
     excluded_cache_prefixes.extend(sorted(LAST_FAILED_PREFIXES))
+    failed_ids = failed_facility_ids(facilities)
     if LAST_FAILED_PREFIXES:
         facilities_for_write = {
             k: v for k, v in facilities_for_write.items()
@@ -1551,19 +1807,24 @@ def main() -> None:
                 clear_target,
                 start_ymd,
                 end_ymd,
-                keep_yongin_today=(clear_target in ("all", "yongin")),
+                keep_yongin_today=False,
                 exclude_prefixes=excluded_cache_prefixes,
+                exclude_facility_ids=failed_ids,
                 commit=False,
             )
         else:
             print("[CACHE] skip clear: no dates in availability")
 
         # 2) 프론트용 저장 (시설/availability_cache)
+        cache_write_ok = True
         try:
             delete_expired_availability_cache(conn, commit=False)
             upsert_facilities_for_frontend(conn, facilities_for_write, commit=False)
             if clear_target in ("all", "yongin"):
-                prune_stale_yongin_facilities(conn, facilities_for_write.keys(), commit=False)
+                if YONGIN_FACILITY_LIST_PARTIAL_FAILURE:
+                    print("[YONGIN][PRUNE] skipped: facility list partial failure")
+                else:
+                    prune_stale_yongin_facilities(conn, facilities_for_write.keys(), commit=False)
             if clear_target in ("all", "hanam"):
                 prune_stale_prefix_facilities(conn, "hanam:", facilities_for_write.keys(), commit=False)
             if clear_target in ("all", "uiwang"):
@@ -1574,7 +1835,7 @@ def main() -> None:
                 conn,
                 facilities_for_write,
                 availability_for_write,
-                keep_yongin_today=(clear_target in ("all", "yongin")),
+                keep_yongin_today=False,
                 commit=False,
             )
             conn.commit()
@@ -1590,8 +1851,12 @@ def main() -> None:
             )
         except Exception as e:
             conn.rollback()
-            # 프론트용 저장이 실패해도 알림은 계속 수행할 수 있게 한다
-            print(f"[WARN] frontend cache save failed: {e}")
+            cache_write_ok = False
+            print(f"[WARN] frontend cache save failed; alarms skipped: {e}")
+
+        if not cache_write_ok:
+            print("[SUMMARY] alarms=0 (frontend cache write failed)")
+            return
 
         # 3) alarms preload
         alarms = load_alarms(conn)
@@ -1655,9 +1920,14 @@ def main() -> None:
 
             cur_slots: Set[str] = set()
             for fid in fids:
+                if any(str(fid).startswith(prefix) for prefix in excluded_cache_prefixes):
+                    continue
                 day_map = availability.get(str(fid)) or {}
                 slots = day_map.get(ymd) or []
+                meta = facilities.get(str(fid)) if isinstance(facilities, dict) else {}
                 for t in slots:
+                    if not alarm_slot_is_current(meta, ymd, t, fid):
+                        continue
                     if not slot_matches_time_condition(t, mode, hour):
                         continue
                     sk = slot_key_from_time(t)
