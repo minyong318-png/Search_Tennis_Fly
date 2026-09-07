@@ -69,6 +69,8 @@ RESERVATION_TYPE_LABELS = {
 
 def normalize_reservation_type(value):
     text = str(value or "").strip().replace(" ", "")
+    if text in {"district_priority", "city_priority", "general", "unknown"}:
+        return text
     if text in {"RESIDENTRESVE", "구민우선", "구민예약", "구민"}:
         return "district_priority"
     if text in {"CITIZENRESVE", "시민우선", "시민예약", "시민"}:
@@ -91,11 +93,13 @@ def reservation_type_label(value, fallback=""):
 
 def normalize_application_status(value):
     text = str(value or "").strip().replace(" ", "").lower()
+    if text in {"open", "closed", "not_open", "unknown"}:
+        return text
     if not text:
         return "unknown"
     if any(token in text for token in ("접수마감", "예약마감", "마감", "closed", "full")):
         return "closed"
-    if any(token in text for token in ("접수예정", "접수전", "예약예정", "예정", "notopen")):
+    if any(token in text for token in ("접수예정", "접수대기", "접수전", "예약예정", "예정", "notopen")):
         return "not_open"
     if any(token in text for token in ("접수중", "예약가능", "예약중", "open")):
         return "open"

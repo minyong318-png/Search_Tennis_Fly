@@ -10,6 +10,36 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 
 class ReservationAccuracyTests(unittest.TestCase):
+    def test_canonical_reservation_types_survive_normalization(self):
+        import tennis_core
+
+        for reservation_type in ("district_priority", "city_priority", "general", "unknown"):
+            with self.subTest(reservation_type=reservation_type):
+                self.assertEqual(reservation_type, tennis_core.normalize_reservation_type(reservation_type))
+
+    def test_source_waiting_status_and_canonical_not_open_are_not_open(self):
+        import tennis_core
+
+        for status in ("접수대기", "접수 대기", "not_open"):
+            with self.subTest(status=status):
+                self.assertEqual("not_open", tennis_core.normalize_application_status(status))
+
+    def test_not_open_product_does_not_request_available_times(self):
+        import tennis_core
+
+        with patch.object(tennis_core, "fetch_times", new=AsyncMock(return_value=[])) as fetch_times:
+            result = asyncio.run(tennis_core.fetch_availability(
+                None,
+                "14168",
+                title="남사 테니스장_10월",
+                facility_meta={"applicationStatus": "not_open", "applicationStatusLabel": "접수대기"},
+                start_date=datetime(2026, 9, 7, tzinfo=timezone.utc),
+            ))
+
+        fetch_times.assert_not_awaited()
+        self.assertEqual("not_open", result["_availability_status_by_date"]["20261001"])
+        self.assertEqual([], result["20261001"])
+
     def test_parse_facility_html_preserves_reservation_type_and_application_status(self):
         import tennis_core
 
