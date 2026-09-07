@@ -326,29 +326,28 @@ def _date_in_range_yyyymmdd(ymd: str, start: Any, end: Any) -> bool:
 
 
 def alarm_slot_is_current(meta: Any, ymd: str, slot: Any, facility_id: str = "") -> bool:
-    """Apply the same status/date/time guards to in-memory alarm candidates."""
+    """Check all slots, with reservation-product rules limited to Yongin."""
     if not tennis_core.is_publishable_slot(slot) or not isinstance(meta, dict):
         return False
     if _normalized_ymd(ymd) < kst_today_yyyymmdd():
         return False
-    status = tennis_core.normalize_application_status(
-        meta.get("applicationStatus")
-        or meta.get("application_status")
-        or meta.get("applicationStatusLabel")
-        or meta.get("application_status_label")
-    )
-    if status in {"closed", "not_open"}:
-        return False
-    if str(facility_id).startswith("yongin:") and status != "open":
-        return False
+    if str(facility_id).startswith("yongin:") or re.fullmatch(r"[0-9]+", str(facility_id)):
+        status = tennis_core.normalize_application_status(
+            meta.get("applicationStatus")
+            or meta.get("application_status")
+            or meta.get("applicationStatusLabel")
+            or meta.get("application_status_label")
+        )
+        if status != "open":
+            return False
+        if not _date_in_range_yyyymmdd(ymd, meta.get("useStartDate") or meta.get("use_start_date"), meta.get("useEndDate") or meta.get("use_end_date")):
+            return False
     failed_dates = {_normalized_ymd(value) for value in (meta.get("_failed_dates") or [])}
     if _normalized_ymd(ymd) in failed_dates:
         return False
     status_by_date = meta.get("_availability_status_by_date") or meta.get("availability_status_by_date") or {}
     availability_status = str(status_by_date.get(ymd) or status_by_date.get(_normalized_ymd(ymd)) or "available")
     if availability_status != "available":
-        return False
-    if not _date_in_range_yyyymmdd(ymd, meta.get("useStartDate") or meta.get("use_start_date"), meta.get("useEndDate") or meta.get("use_end_date")):
         return False
     if _normalized_ymd(ymd) == kst_today_yyyymmdd():
         match = re.search(r"(\d{1,2}):(\d{2})", slot_key_from_time(slot))
