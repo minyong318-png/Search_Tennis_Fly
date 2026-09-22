@@ -168,6 +168,22 @@ class GoyangValidationTests(unittest.TestCase):
         self.assertEqual(result['facilities']['gy-baekseok']['_court_labels']['6'], '1코트')
         self.assertEqual([s['courtNo'] for s in result['availability']['gy-baekseok']['2026-09-23']], ['6', '7'])
 
+    def test_explicit_holiday_page_is_verified_empty(self):
+        html = '''<input name="rent_date" value="20260924">
+        <select name="place_opt"><option value="" selected>장소 선택</option>
+        <option value="2" selected>1코트(성저테니스)</option></select>
+        <table summary="행사 및 대관일정표입니다."><tr><td>24</td></tr></table>
+        <p>선택하신 날짜는 추석연휴 입니다.</p>'''
+        c.validate_gys_page(html, 200, '20260924')
+        self.assertEqual(c.parse_slots_daehwa(html), [])
+        with self.assertRaises(ValueError):
+            c.validate_gys_page(html.replace('선택하신 날짜는 추석연휴 입니다.', '서버 오류'), 200, '20260924')
+
+    def test_baekseok_alternate_timetable_summary(self):
+        html = gys_html().replace('이용신청 테이블', '대관신청 테이블')
+        c.validate_gys_page(html, 200, '20260923')
+        self.assertEqual(c.parse_slots_daehwa(html)[0]['slotKey'], '08:00~10:00')
+
 
 if __name__ == '__main__':
     unittest.main()

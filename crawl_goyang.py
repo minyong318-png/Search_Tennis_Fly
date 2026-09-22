@@ -535,6 +535,8 @@ def parse_slots_daehwa(html: str, summary_keyword: str = "이용신청 테이블
     soup = BeautifulSoup(html, "lxml")
 
     table = soup.find("table", attrs={"summary": re.compile(re.escape(summary_keyword))})
+    if table is None:
+        table = soup.find("table", summary="대관신청 테이블")
     if not table:
         for t in soup.find_all("table"):
             if t.select_one('input[name="rent_chk[]"]'):
@@ -607,10 +609,19 @@ def validate_gys_page(html: str, status: int, yyyymmdd: str, allow_selection: bo
     date_input = soup.select_one('input[name="rent_date"]')
     if date_input is None or re.sub(r"\D", "", date_input.get("value", "")) != yyyymmdd:
         raise ValueError(f"GYS date mismatch date={yyyymmdd}")
-    table = soup.find("table", attrs={"summary": re.compile("이용신청 테이블")})
+    table = soup.find("table", attrs={"summary": re.compile(r"^(?:이용|대관)신청 테이블$")})
     if table is None or not TIME_RE.search(table.get_text(" ", strip=True)):
-        if allow_selection and not _gys_selected_place(soup) and _gys_places(soup) and soup.find("table", summary="행사 및 대관일정표입니다."):
-            return soup
+        calendar = soup.find("table", summary="행사 및 대관일정표입니다.")
+        selected = _gys_selected_place(soup)
+        if calendar is not None:
+            if allow_selection and not selected and _gys_places(soup):
+                return soup
+            closed_notice = re.search(
+                r"선택하신\s*날짜는\s*[^.!?]{0,30}(?:연휴|휴관일|휴장일|휴무일)\s*입니다",
+                soup.get_text(" ", strip=True),
+            )
+            if selected in _gys_places(soup) and closed_notice:
+                return soup
         raise ValueError(f"GYS missing timetable date={yyyymmdd}")
     return soup
 
