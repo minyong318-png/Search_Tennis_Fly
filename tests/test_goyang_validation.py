@@ -79,6 +79,27 @@ class GoyangValidationTests(unittest.TestCase):
         self.assertEqual(result['availability']['gy-gytennis-7'], {'2026-09-23': []})
         self.assertEqual(result['facilities']['gy-gytennis-7']['_court_numbers'], ['1'])
 
+    def test_exhausted_retries_do_not_publish_failed_dates(self):
+        with patch.object(c, 'build_date_range_kst', return_value=(False, ['2026-09-23'])), \
+             patch.object(c, 'fetch_gytennis_day', return_value={}) as fetch, \
+             patch('time.sleep'):
+            result = c.crawl_gytennis()
+        self.assertTrue(result['partial_failure'])
+        self.assertEqual(fetch.call_count, 3)
+        self.assertTrue(all(not days for days in result['availability'].values()))
+
+    def test_rate_limit_retry_waits_before_recovery(self):
+        limited = response('rate limited', 429)
+        limited.headers['Retry-After'] = '120'
+        attempts = [requests.HTTPError(response=limited)] + [{'1': []}] * 10
+        with patch.object(c, 'build_date_range_kst', return_value=(False, ['2026-09-23'])), \
+             patch.object(c, 'fetch_gytennis_day', side_effect=attempts), \
+             patch('time.sleep') as sleep:
+            result = c.crawl_gytennis()
+        sleep.assert_any_call(120.0)
+        self.assertFalse(result['partial_failure'])
+        self.assertEqual(len(result['availability']), 10)
+
     def test_daehwa_failed_page_marks_crawl_partial(self):
         with patch.object(c, 'build_date_range_kst', return_value=(False, ['2026-09-23'])), \
              patch.object(c, 'login_daehwa'), \

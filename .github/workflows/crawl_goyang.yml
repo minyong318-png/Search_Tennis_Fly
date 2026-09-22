@@ -10,6 +10,12 @@ on:
         description: "Run Goyang crawl outside the KST 05:00~22:00 window"
         required: false
         default: "false"
+      audit:
+        description: "Inspect source pages without DB writes, or verify source against saved data"
+        type: choice
+        required: false
+        default: "none"
+        options: [none, inspect-gys, verify]
 
 concurrency:
   group: tennis-crawl-goyang
@@ -45,6 +51,8 @@ jobs:
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           RUN_TARGET: "goyang"
+          PYTHONUNBUFFERED: "1"
+          GOYANG_AUDIT: ${{ inputs.audit }}
           FORCE_GOYANG_CRAWL: ${{ inputs.force }}
           GYT_USE_CURL_CFFI: "1"
           GYT_DEBUG_DUMP: "1"
@@ -59,7 +67,14 @@ jobs:
         run: |
           $python = "$env:LOCALAPPDATA\Programs\Python\Python311\python.exe"
           if (-not (Test-Path $python)) { $python = "python" }
-          .\scripts\run_local_refresh.ps1 -Target goyang -Python $python
+          if ($env:GOYANG_AUDIT -eq "inspect-gys") {
+            & $python scripts/audit_goyang_refresh.py --inspect-gys
+          } elseif ($env:GOYANG_AUDIT -eq "verify") {
+            & $python scripts/audit_goyang_refresh.py
+          } else {
+            .\scripts\run_local_refresh.ps1 -Target goyang -Python $python
+          }
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Upload gytennis debug artifact
         if: always()
