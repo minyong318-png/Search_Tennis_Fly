@@ -3,9 +3,7 @@ import re
 import json
 import calendar
 import datetime as dt
-import threading
-from pathlib import Path
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import time
 from typing import Dict, List, Tuple
 from urllib.parse import quote, urljoin
 
@@ -127,6 +125,8 @@ def make_session() -> requests.Session:
 
 def make_gytennis_session() -> requests.Session:
     s = make_session()
+    # The crawler owns bounded retries and rate-limit backoff.
+    s.mount("https://", HTTPAdapter(max_retries=0))
     proxy_url = (os.getenv("GYT_PROXY_URL") or "").strip()
     if proxy_url:
         s.proxies.update({"http": proxy_url, "https": proxy_url})
@@ -181,6 +181,7 @@ def parse_gytennis_slots(html: str) -> Dict[str, List[dict]]:
         if not m:
             continue
         court_no = m.group(1)
+        out.setdefault(court_no, [])
 
         rows = tbl.select("tr")[1:]
         for idx, tr in enumerate(rows):
@@ -237,153 +238,57 @@ def fetch_gytennis_day(
     ymd: str,
     ssl_fallback_state: dict | None = None,
 ) -> Dict[str, List[dict]]:
+    """Read one dated public timetable; invalid responses are never sold-out days."""
     url = f"{GYT_BASE}/{courtvalue}/{ymd}"
-    url_alt = f"{GYT_BASE}/{courtvalue}/{ymd.replace('-', '')}"
-    base_court_url = f"{GYT_BASE}/{courtvalue}"
-    use_insecure = bool((ssl_fallback_state or {}).get("use_insecure"))
+    state = ssl_fallback_state if ssl_fallback_state is not None else {}
     prefer_curl = (os.getenv("GYT_USE_CURL_CFFI") or "0").strip() == "1"
-    proxy_url = (os.getenv("GYT_PROXY_URL") or "").strip()
-
-    req_headers = {
+    headers = {
         "User-Agent": UA,
         "Accept": "text/html,application/xhtml+xml",
         "Referer": "https://www.gytennis.or.kr/daily",
     }
 
-    def _count_request(method: str) -> None:
-        if ssl_fallback_state is None:
-            return
-        lock = ssl_fallback_state.setdefault("_request_lock", threading.Lock())
-        with lock:
-            key = f"_request_{method}"
-            ssl_fallback_state[key] = ssl_fallback_state.get(key, 0) + 1
-
-    def _get(u: str, insecure: bool):
-        _count_request("get")
+    def get_page():
+        state["_request_get"] = state.get("_request_get", 0) + 1
+        kwargs = dict(timeout=_gyt_timeout(), verify=not state.get("use_insecure"), headers=headers)
         if prefer_curl and curl_requests is not None:
             return curl_requests.get(
-                u,
-                timeout=_gyt_timeout(),
-                verify=(not insecure),
-                impersonate="chrome",
-                headers=req_headers,
-                proxy=(proxy_url or None),
+                url, **kwargs, impersonate="chrome",
+                proxy=(os.getenv("GYT_PROXY_URL") or "").strip() or None,
             )
-        return session.get(u, timeout=_gyt_timeout(), verify=(not insecure), headers=req_headers)
-
-    def _post(u: str, data: dict, insecure: bool):
-        _count_request("post")
-        if prefer_curl and curl_requests is not None:
-            return curl_requests.post(
-                u,
-                data=data,
-                timeout=_gyt_timeout(),
-                verify=(not insecure),
-                impersonate="chrome",
-                headers={**req_headers, "Referer": u},
-                proxy=(proxy_url or None),
-            )
-        return session.post(u, data=data, timeout=_gyt_timeout(), verify=(not insecure), headers={**req_headers, "Referer": u})
-
-    def _valid_slots_html(h: str) -> bool:
-        if not h:
-            return False
-        if "location.replace('https://www.gytennis.or.kr')" in h:
-            return False
-        soup = BeautifulSoup(h, "lxml")
-        return bool(soup.select("table.custom") and soup.select("table.innerCustom"))
-
-    def _fetch_via_form(insecure: bool):
-        # ?? ?? ??: ?? ??? GET -> hidden ? ?? -> POST(cvalue/cdate/van_code)
-        r0 = _get(base_court_url, insecure)
-        if r0.status_code != 200:
-            return r0
-        html0 = fix_encoding(r0)
-        soup = BeautifulSoup(html0, "lxml")
-        payload: Dict[str, str] = {}
-        for inp in soup.select("form input[name]"):
-            name = inp.get("name")
-            if not name:
-                continue
-            t = (inp.get("type") or "").lower()
-            if t in ("checkbox", "radio"):
-                continue
-            if name.endswith("[]"):
-                continue
-            payload[name] = inp.get("value", "")
-        payload["cvalue"] = str(courtvalue)
-        payload["cdate"] = ymd
-        return _post(base_court_url, payload, insecure)
+        return session.get(url, **kwargs)
 
     try:
-        r = _fetch_via_form(use_insecure)
-    except Exception as e:
-        if not _is_ssl_error(e):
+        response = get_page()
+    except Exception as exc:
+        if not _is_ssl_error(exc):
             raise
-        if ssl_fallback_state is not None:
-            ssl_fallback_state["use_insecure"] = True
-        print(f"[GYT][SSL_WARN] switch to verify=False for gytennis session: first_fail cv={courtvalue} date={ymd} err={e}")
-        r = _fetch_via_form(True)
+        state["use_insecure"] = True
+        print("[GYT][SSL_WARN] using existing certificate fallback")
+        response = get_page()
 
-    html = fix_encoding(r) if r.status_code == 200 else ""
-    if r.status_code != 200 or not _valid_slots_html(html) or not gytennis_html_matches_date(html, ymd):
-        # fallback 1: ?? URL GET
-        try:
-            r2 = _get(url, bool((ssl_fallback_state or {}).get("use_insecure")))
-            html2 = fix_encoding(r2) if r2.status_code == 200 else ""
-            if r2.status_code == 200 and _valid_slots_html(html2) and gytennis_html_matches_date(html2, ymd):
-                html = html2
-            else:
-                # fallback 2: compact ?? URL
-                r3 = _get(url_alt, bool((ssl_fallback_state or {}).get("use_insecure")))
-                html3 = fix_encoding(r3) if r3.status_code == 200 else ""
-                if r3.status_code == 200 and _valid_slots_html(html3) and gytennis_html_matches_date(html3, ymd):
-                    html = html3
-                else:
-                    return {}
-        except Exception as e:
-            if not _is_ssl_error(e):
-                raise
-            if ssl_fallback_state is not None:
-                ssl_fallback_state["use_insecure"] = True
-            r2 = _get(url, True)
-            html2 = fix_encoding(r2) if r2.status_code == 200 else ""
-            if r2.status_code == 200 and _valid_slots_html(html2) and gytennis_html_matches_date(html2, ymd):
-                html = html2
-            else:
-                r3 = _get(url_alt, True)
-                html3 = fix_encoding(r3) if r3.status_code == 200 else ""
-                if r3.status_code == 200 and _valid_slots_html(html3) and gytennis_html_matches_date(html3, ymd):
-                    html = html3
-                else:
-                    return {}
-
-    parsed = parse_gytennis_slots(html)
-    best = parsed
-    best_count = sum(len(v) for v in best.values()) if best else 0
-
-    # 폼 응답과 URL 조회 결과를 비교해 더 많은 슬롯을 채택
-    for u in (url, url_alt):
-        try:
-            rr = _get(u, bool((ssl_fallback_state or {}).get("use_insecure")))
-        except Exception as e:
-            if not _is_ssl_error(e):
-                raise
-            if ssl_fallback_state is not None:
-                ssl_fallback_state["use_insecure"] = True
-            rr = _get(u, True)
-        if rr.status_code != 200:
-            continue
-        hh = fix_encoding(rr)
-        if not _valid_slots_html(hh) or not gytennis_html_matches_date(hh, ymd):
-            continue
-        parsed2 = parse_gytennis_slots(hh)
-        cnt2 = sum(len(v) for v in parsed2.values()) if parsed2 else 0
-        if cnt2 > best_count:
-            best = parsed2
-            best_count = cnt2
-
-    return best
+    if response.status_code != 200:
+        raise requests.HTTPError(
+            f"GYT HTTP {response.status_code}: court={courtvalue} date={ymd}",
+            response=response,
+        )
+    html = fix_encoding(response)
+    if not gytennis_html_matches_date(html, ymd):
+        raise ValueError(f"GYT date mismatch: court={courtvalue} expected={ymd}")
+    soup = BeautifulSoup(html, "lxml")
+    times = soup.select("table.custom tr td.wide")
+    courts = soup.select("table.innerCustom")
+    if not times or not courts:
+        raise ValueError(f"GYT missing timetable: court={courtvalue} date={ymd}")
+    if any(not TIME_RE.fullmatch(_normalize_time_label(td.get_text())) for td in times):
+        raise ValueError(f"GYT invalid time labels: court={courtvalue} date={ymd}")
+    for court in courts:
+        tag = court.select_one("td.courtTag")
+        if not tag or not re.match(r"\d+", tag.get_text().strip()):
+            raise ValueError(f"GYT missing court number: court={courtvalue} date={ymd}")
+        if len(court.select("td.resTag")) != len(times):
+            raise ValueError(f"GYT incomplete timetable: court={courtvalue} date={ymd}")
+    return parse_gytennis_slots(html)
 
 
 def warmup_gytennis_session(session: requests.Session, ssl_fallback_state: dict) -> None:
@@ -404,176 +309,68 @@ def warmup_gytennis_session(session: requests.Session, ssl_fallback_state: dict)
 
 def crawl_gytennis() -> dict:
     cutoff_passed, dates = build_date_range_kst(cutoff_day=25, cutoff_hour=22, cutoff_minute=0)
-    now = kst_now()
-    print(f"[GYT] KST now={now:%Y-%m-%d %H:%M} cutoffPassed={cutoff_passed} dates={len(dates)}")
-
-    proxy_url = (os.getenv("GYT_PROXY_URL") or "").strip()
-    print(f"[GYT][PROXY] {'enabled' if proxy_url else 'disabled'}")
-    s = make_gytennis_session()
-    ssl_fallback_state = {"use_insecure": False}
-    warmup_gytennis_session(s, ssl_fallback_state)
-    worker_local = threading.local()
-    session_generation = {"value": 0}
-
-    facilities: Dict[str, dict] = {}
-    availability: Dict[str, Dict[str, List[dict]]] = {}
-    avail_lock = threading.Lock()
-
-    for cv in range(1, 11):
-        fid = f"gy-gytennis-{cv}"
-        facilities[fid] = {"title": f"고양테니스협회 {GYT_NAME.get(cv, f'courtvalue {cv}')}", "location": "고양시", "courtvalue": cv}
-        availability[fid] = {}
-
+    print(f"[GYT] KST now={kst_now():%Y-%m-%d %H:%M} cutoffPassed={cutoff_passed} dates={len(dates)}")
+    session = make_gytennis_session()
+    state = {"use_insecure": False}
+    facilities = {
+        f"gy-gytennis-{cv}": {
+            "title": f"고양테니스협회 {GYT_NAME[cv]}", "location": "고양시",
+            "courtvalue": cv, "_court_numbers": [],
+        }
+        for cv in range(1, 11)
+    }
+    availability = {fid: {} for fid in facilities}
     stats = {"total": 0, "ok": 0, "empty": 0, "fail": 0}
-    debug_dump = (os.getenv("GYT_DEBUG_DUMP") or "0").strip() == "1"
-
-    def _dump_gyt_debug_samples(tag: str, sample_dates: List[str]) -> None:
-        if not debug_dump:
-            return
-        out_dir = Path("debug") / "gytennis"
-        out_dir.mkdir(parents=True, exist_ok=True)
-        summary_lines = [f"tag={tag}", f"ts={kst_now().isoformat()}"]
-        for cv in (1, 2):
-            for ymd in sample_dates[:2]:
-                url = f"{GYT_BASE}/{cv}/{ymd}"
-                try:
-                    use_insecure = bool(ssl_fallback_state.get("use_insecure"))
-                    r = s.get(
-                        url,
-                        timeout=_gyt_timeout(),
-                        verify=(not use_insecure),
-                        headers={
-                            "User-Agent": UA,
-                            "Accept": "text/html,application/xhtml+xml",
-                            "Referer": "https://www.gytennis.or.kr/daily",
-                        },
-                    )
-                except requests.exceptions.SSLError:
-                    ssl_fallback_state["use_insecure"] = True
-                    r = s.get(
-                        url,
-                        timeout=_gyt_timeout(),
-                        verify=False,
-                        headers={
-                            "User-Agent": UA,
-                            "Accept": "text/html,application/xhtml+xml",
-                            "Referer": "https://www.gytennis.or.kr/daily",
-                        },
-                    )
-                html = fix_encoding(r)
-                soup = BeautifulSoup(html, "lxml")
-                enabled = len(soup.select("td.resTag span.public-empty-slot")) + len(
-                    soup.select('td.resTag input[type="checkbox"]:not([disabled])')
-                )
-                has_redirect = "location.replace('https://www.gytennis.or.kr')" in html
-                name = f"{tag}_cv{cv}_{ymd}.html"
-                (out_dir / name).write_text(html, encoding="utf-8")
-                summary_lines.append(
-                    f"{name} status={r.status_code} len={len(html)} enabled={enabled} redirect_script={has_redirect}"
-                )
-        (out_dir / f"{tag}_summary.txt").write_text("\n".join(summary_lines) + "\n", encoding="utf-8")
-
-    def _worker_session() -> requests.Session:
-        local_generation = getattr(worker_local, "generation", -1)
-        if local_generation != session_generation["value"] or not hasattr(worker_local, "session"):
-            worker_local.session = make_gytennis_session()
-            worker_local.generation = session_generation["value"]
-            warmup_gytennis_session(worker_local.session, ssl_fallback_state)
-        return worker_local.session
-
-    def _reset_worker_session() -> requests.Session:
-        worker_local.session = make_gytennis_session()
-        worker_local.generation = session_generation["value"]
-        warmup_gytennis_session(worker_local.session, ssl_fallback_state)
-        return worker_local.session
-
-    def _task(cv: int, ymd: str) -> Tuple[int, str, str, List[dict]]:
-        last_err: Exception | None = None
-        for attempt in range(1, 4):
-            try:
-                session = _worker_session() if attempt == 1 else _reset_worker_session()
-                court_slots = fetch_gytennis_day(session, cv, ymd, ssl_fallback_state)
-                if not court_slots:
-                    return cv, ymd, "empty", []
-                flat: List[dict] = []
-                for _, slots in court_slots.items():
-                    flat.extend(slots)
-                if not flat:
-                    return cv, ymd, "empty", []
-                return cv, ymd, "ok", flat
-            except Exception as e:
-                last_err = e
-                if attempt < 3:
-                    print(f"[GYT][RETRY] cv={cv} date={ymd} attempt={attempt} err={e}")
-                else:
-                    print(f"[GYT][ERR] cv={cv} date={ymd} err={last_err}")
-        return cv, ymd, "fail", []
-
-    def _probe_session(sample_size: int = 5) -> bool:
-        # 오늘 슬롯이 모두 찬 경우를 차단으로 오판하지 않도록 미래 날짜를 먼저 확인한다.
-        checked = 0
-        ok_found = 0
-        sample_dates = dates[1: min(len(dates), 4)] + dates[:1]
+    # One dated GET per page, at most one per second. The previous six workers
+    # made 3-5 requests per page and silently treated HTTP 429 as no availability.
+    delay = _bounded_float_env("GYT_REQUEST_DELAY_SECONDS", 1.0, 1.0, 10.0)
+    error_message = ""
+    for ymd in dates:
         for cv in range(1, 11):
-            for ymd in sample_dates:
-                checked += 1
-                try:
-                    court_slots = fetch_gytennis_day(s, cv, ymd, ssl_fallback_state)
-                    flat_count = sum(len(v) for v in court_slots.values()) if court_slots else 0
-                    if flat_count > 0:
-                        ok_found += 1
-                        return True
-                except Exception as e:
-                    print(f"[GYT][PROBE_ERR] cv={cv} date={ymd} err={e}")
-                if checked >= sample_size:
-                    return ok_found > 0
-        return ok_found > 0
-
-    probe_ok = _probe_session(sample_size=6)
-    if not probe_ok:
-        _dump_gyt_debug_samples("probe_fail_1", dates)
-        print("[GYT][EARLY_ABORT] probe detected all-empty pattern; retry with new session")
-        s = make_gytennis_session()
-        ssl_fallback_state = {"use_insecure": False}
-        session_generation["value"] += 1
-        warmup_gytennis_session(s, ssl_fallback_state)
-        probe_ok = _probe_session(sample_size=8)
-        if not probe_ok:
-            _dump_gyt_debug_samples("probe_fail_2", dates)
-            print("[GYT][EARLY_ABORT] probe failed again; skip full gytennis crawl for this run")
-            print(f"[GYT][STATS] total={stats['total']} ok={stats['ok']} empty={stats['empty']} fail={stats['fail']}")
-            print(
-                f"[GYT][REQUESTS] get={ssl_fallback_state.get('_request_get', 0)} "
-                f"post={ssl_fallback_state.get('_request_post', 0)}"
-            )
-            return {"facilities": facilities, "availability": availability, "partial_failure": True}
-
-    futures = []
-    with ThreadPoolExecutor(max_workers=6) as ex:
-        for ymd in dates:
-            for cv in range(1, 11):
-                futures.append(ex.submit(_task, cv, ymd))
-
-        for fut in as_completed(futures):
-            cv, ymd, status, flat = fut.result()
+            if stats["total"]:
+                time.sleep(delay)
             stats["total"] += 1
-            if status == "ok":
-                fid = f"gy-gytennis-{cv}"
-                with avail_lock:
-                    availability[fid].setdefault(ymd, []).extend(flat)
-                stats["ok"] += 1
-            elif status == "empty":
-                stats["empty"] += 1
-            else:
-                stats["fail"] += 1
-
+            court_slots = None
+            for attempt in range(3):
+                try:
+                    court_slots = fetch_gytennis_day(session, cv, ymd, state)
+                    if not court_slots:
+                        raise ValueError(f"GYT missing court inventory: court={cv} date={ymd}")
+                    break
+                except Exception as exc:
+                    court_slots = None
+                    error_message = str(exc)
+                    if attempt == 2:
+                        stats["fail"] += 1
+                        print(f"[GYT][ERR] {error_message}")
+                        break
+                    response = getattr(exc, "response", None)
+                    wait = 5.0 * (attempt + 1)
+                    if response is not None and response.status_code == 429:
+                        retry_after = (getattr(response, "headers", {}) or {}).get("Retry-After", "")
+                        wait = max(60.0, float(retry_after)) if str(retry_after).isdigit() else 60.0
+                    print(f"[GYT][RETRY] cv={cv} date={ymd} attempt={attempt + 1} wait={wait:g}s error={error_message}")
+                    time.sleep(wait)
+            if court_slots is None:
+                # Stop repeated traffic after an exhausted retry, preserving the
+                # existing Goyang cache through the region's partial-failure guard.
+                break
+            fid = f"gy-gytennis-{cv}"
+            known_courts = set(facilities[fid]["_court_numbers"])
+            known_courts.update(court_slots)
+            facilities[fid]["_court_numbers"] = sorted(known_courts, key=int)
+            flat = [slot for slots in court_slots.values() for slot in slots]
+            availability[fid][ymd] = flat
+            stats["ok" if flat else "empty"] += 1
+        if stats["fail"]:
+            break
     print(f"[GYT][STATS] total={stats['total']} ok={stats['ok']} empty={stats['empty']} fail={stats['fail']}")
-    print(
-        f"[GYT][REQUESTS] get={ssl_fallback_state.get('_request_get', 0)} "
-        f"post={ssl_fallback_state.get('_request_post', 0)}"
-    )
-
-    return {"facilities": facilities, "availability": availability, "partial_failure": stats["fail"] > 0}
+    print(f"[GYT][REQUESTS] get={state.get('_request_get', 0)} post=0")
+    return {
+        "facilities": facilities, "availability": availability,
+        "partial_failure": stats["fail"] > 0,
+        "error_message": error_message if stats["fail"] else "",
+    }
 
 
 DAEHWA_BASE = "https://daehwa.gys.or.kr:451"
@@ -785,6 +582,19 @@ def post_rent(s: requests.Session, payload: Dict[str, str], ssl_fallback_state: 
     return html, r.url, r.status_code
 
 
+def validate_gys_page(html: str, status: int, yyyymmdd: str) -> BeautifulSoup:
+    if status != 200:
+        raise ValueError(f"GYS HTTP {status} date={yyyymmdd}")
+    soup = BeautifulSoup(html, "lxml")
+    date_input = soup.select_one('input[name="rent_date"]')
+    if date_input is None or re.sub(r"\D", "", date_input.get("value", "")) != yyyymmdd:
+        raise ValueError(f"GYS date mismatch date={yyyymmdd}")
+    table = soup.find("table", attrs={"summary": re.compile("이용신청 테이블")})
+    if table is None or not TIME_RE.search(table.get_text(" ", strip=True)):
+        raise ValueError(f"GYS missing timetable date={yyyymmdd}")
+    return soup
+
+
 def crawl_daehwa() -> dict:
     cutoff_passed, dates_ymd = build_date_range_kst(cutoff_day=25, cutoff_hour=10, cutoff_minute=0)
     now = kst_now()
@@ -795,7 +605,7 @@ def crawl_daehwa() -> dict:
     login_daehwa(s, ssl_fallback_state)
 
     facility_id = "gy-daehwa"
-    facilities = {facility_id: {"title": "고양 대화 테니스장", "location": "고양시"}}
+    facilities = {facility_id: {"title": "고양 대화 테니스장", "location": "고양시", "_court_numbers": [str(n) for n in DAEHWA_PLACE]}}
     availability: Dict[str, Dict[str, List[dict]]] = {facility_id: {}}
 
     stats = {"total": 0, "ok": 0, "empty": 0, "fail": 0}
@@ -817,6 +627,7 @@ def crawl_daehwa() -> dict:
                 if is_login_page(html, final_url):
                     raise RuntimeError(f"daehwa login required after retry. final_url={final_url}")
 
+                validate_gys_page(html, _status, yyyymmdd)
                 slots = parse_slots_daehwa(html)
                 for sl in slots:
                     sl["courtNo"] = str(court_no)
@@ -829,12 +640,13 @@ def crawl_daehwa() -> dict:
                 stats["fail"] += 1
                 print(f"[DAEHWA][ERR] date={ymd} court={court_no} place_opt={place_opt} err={e}")
 
-        if day_slots:
-            availability[facility_id].setdefault(ymd, []).extend(day_slots)
+        if stats["fail"]:
+            break
+        availability[facility_id][ymd] = day_slots
 
     print(f"[DAEHWA][STAT] total={stats['total']} ok={stats['ok']} empty={stats['empty']} fail={stats['fail']}")
 
-    return {"facilities": facilities, "availability": availability}
+    return {"facilities": facilities, "availability": availability, "partial_failure": stats["fail"] > 0}
 
 
 def _curl_text(resp) -> str:
@@ -927,14 +739,14 @@ def crawl_baekseok() -> dict:
     print(f"[BAEKSEOK] KST now={now:%Y-%m-%d %H:%M} cutoffPassed={cutoff_passed} dates={len(dates_ymd)}")
 
     facility_id = "gy-baekseok"
-    facilities = {facility_id: {"title": "백석 테니스장", "location": "고양시"}}
+    facilities = {facility_id: {"title": "백석 테니스장", "location": "고양시", "_court_numbers": []}}
     availability: Dict[str, Dict[str, List[dict]]] = {facility_id: {}}
     stats = {"total": 0, "ok": 0, "empty": 0, "fail": 0, "login_required": 0}
 
     if curl_requests is None:
         print("[BAEKSEOK][WARN] curl_cffi unavailable; skip")
         print("[BAEKSEOK][STAT] total=0 ok=0 empty=0 fail=1 login_required=0")
-        return {"facilities": facilities, "availability": availability}
+        return {"facilities": facilities, "availability": availability, "partial_failure": True}
 
     session = curl_requests.Session(impersonate="chrome")
     session.headers.update({"User-Agent": UA, "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8"})
@@ -962,16 +774,17 @@ def crawl_baekseok() -> dict:
         )
         return {"facilities": facilities, "availability": availability, "partial_failure": True}
 
-    # 백석은 URL의 part_opt=07로 시설이 고정된다. place_opt는 비워 먼저 조회하고,
-    # 화면에 코트별 place_opt가 노출되면 그 값을 추가로 순회한다.
-    discovered_places = [""]
+    discovered_places = []
 
     for ymd in dates_ymd:
         yyyymmdd = yyyymmdd_from_ymd(ymd)
         day_slots: List[dict] = []
-        places_for_day = list(dict.fromkeys(discovered_places))
+        places_for_day = list(discovered_places) or [""]
+        completed_places = set()
 
-        for place_idx, place_opt in enumerate(places_for_day, start=1):
+        for place_opt in places_for_day:
+            if place_opt in completed_places:
+                continue
             stats["total"] += 1
             try:
                 payload = build_payload_gys(place_opt, yyyymmdd, part_opt=BAEKSEOK_PART_OPT)
@@ -991,15 +804,31 @@ def crawl_baekseok() -> dict:
                     stats["login_required"] += 1
                     raise RuntimeError(f"baekseok login required after retry. final_url={final_url}")
 
-                soup = BeautifulSoup(html, "lxml")
+                soup = validate_gys_page(html, resp.status_code, yyyymmdd)
                 for opt in soup.select('select[name="place_opt"] option[value], input[name="place_opt"][value]'):
                     value = (opt.get("value") or "").strip()
                     if value and value not in discovered_places:
                         discovered_places.append(value)
+                        # Visit discovered courts on this date too.
+                        if value not in places_for_day:
+                            places_for_day.append(value)
+
+                selected = soup.select_one('select[name="place_opt"] option[selected], input[name="place_opt"][value]')
+                if selected is None:
+                    selected = soup.select_one('select[name="place_opt"] option[value]:not([value=""])')
+                selected_place = (selected.get("value") or "").strip() if selected else ""
+                actual_place = selected_place or place_opt or "1"
+                if place_opt and selected_place and selected_place != place_opt:
+                    raise ValueError(f"Baekseok court mismatch requested={place_opt} received={selected_place}")
+                if actual_place in completed_places:
+                    continue
+                completed_places.add(actual_place)
+                if actual_place not in facilities[facility_id]["_court_numbers"]:
+                    facilities[facility_id]["_court_numbers"].append(actual_place)
 
                 slots = parse_slots_daehwa(html)
                 for sl in slots:
-                    sl["courtNo"] = str(place_opt or place_idx)
+                    sl["courtNo"] = actual_place
                     sl["reserveUrl"] = f"{BAEKSEOK_RENT}?part_opt={BAEKSEOK_PART_OPT}"
 
                 if slots:
@@ -1018,8 +847,9 @@ def crawl_baekseok() -> dict:
                     )
                     return {"facilities": facilities, "availability": availability, "partial_failure": True}
 
-        if day_slots:
-            availability[facility_id].setdefault(ymd, []).extend(day_slots)
+        if stats["fail"]:
+            break
+        availability[facility_id][ymd] = day_slots
 
     print(
         f"[BAEKSEOK][STAT] total={stats['total']} ok={stats['ok']} empty={stats['empty']} "

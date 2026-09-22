@@ -533,13 +533,20 @@ def _goyang_split_title(meta: dict, suffix: str) -> dict:
 def _split_daymap_by_court(
     daymap: Dict[str, List[Any]],
     reserve_url_builder,
+    court_numbers: Iterable[Any] = (),
 ) -> Dict[str, Dict[str, List[dict]]]:
     """
     daymap: {yyyymmdd: [slot(dict)...]}
     return: {courtNo: {yyyymmdd: [slot(dict)...]}}
     reserve_url_builder(slot, yyyymmdd) -> str | None
     """
-    out: Dict[str, Dict[str, List[dict]]] = {}
+    # The source inventory lets verified empty pages clear previous slots for
+    # every court, including courts with no openings anywhere in this crawl.
+    out: Dict[str, Dict[str, List[dict]]] = {
+        str(cno).strip(): {ymd: [] for ymd in (daymap or {})}
+        for cno in (court_numbers or ())
+        if str(cno).strip()
+    }
     for yyyymmdd, slots in (daymap or {}).items():
         for s in (slots or []):
             if not isinstance(s, dict):
@@ -644,7 +651,9 @@ def crawl_all() -> Tuple[Dict[str, Any], Dict[str, Dict[str, List[Any]]]]:
             **out_g3.get("availability", {}),
         }
         crawl_goyang.LAST_PARTIAL_FAILURE = any(
-            bool(out.get("partial_failure")) for out in (out_g1, out_g2, out_g3)
+            bool(out.get("partial_failure"))
+            or (out.get("diagnostic") or {}).get("status") not in {"normal", "no_reservations"}
+            for out in (out_g1, out_g2, out_g3)
         )
 
         # -------------------------------------------------
@@ -682,30 +691,6 @@ def crawl_all() -> Tuple[Dict[str, Any], Dict[str, Dict[str, List[Any]]]]:
             m["title"] = f"{base} {suffix}".strip() if suffix else base
             return m
 
-        def _split_daymap_by_court(
-            daymap: Dict[str, List[Any]],
-            reserve_url_builder,
-        ) -> Dict[str, Dict[str, List[dict]]]:
-            """
-            daymap: {yyyymmdd: [slot(dict)...]}
-            return: {courtNo: {yyyymmdd: [slot(dict)...]}}
-            reserve_url_builder(slot, yyyymmdd) -> str | None
-            """
-            out: Dict[str, Dict[str, List[dict]]] = {}
-            for yyyymmdd, slots in (daymap or {}).items():
-                for s in (slots or []):
-                    if not isinstance(s, dict):
-                        continue
-                    cno = str(s.get("courtNo") or "").strip()
-                    if not cno:
-                        continue
-                    ss = dict(s)
-                    url = reserve_url_builder(ss, yyyymmdd)
-                    if url:
-                        ss["reserveUrl"] = url
-                    out.setdefault(cno, {}).setdefault(yyyymmdd, []).append(ss)
-            return out
-
         # -------------------------------------------------
         # availability 처리: 날짜키 변환 + 코트별 facility로 분리
         # -------------------------------------------------
@@ -731,9 +716,10 @@ def crawl_all() -> Tuple[Dict[str, Any], Dict[str, Dict[str, List[Any]]]]:
                     return f"https://www.gytennis.or.kr/daily/{cv}/{ymd_dash}"
 
                 # 3) 코트별 분리
-                split = _split_daymap_by_court(new_daymap, gytennis_url_builder)
-
                 base_meta = base_meta_gytennis.get(cv, {"title": f"{cv}코트", "location": "고양시", "courtvalue": cv})
+                split = _split_daymap_by_court(
+                    new_daymap, gytennis_url_builder, base_meta.get("_court_numbers", ())
+                )
 
                 for cno, c_daymap in split.items():
                     fid = f"goyang:gytennis:{cv}:{cno}"
@@ -758,9 +744,10 @@ def crawl_all() -> Tuple[Dict[str, Any], Dict[str, Dict[str, List[Any]]]]:
                     return "https://daehwa.gys.or.kr:451/rent/tennis_rent.php"
 
                 # 3) 코트별 분리
-                split = _split_daymap_by_court(new_daymap, daehwa_url_builder)
-
                 base_meta = base_meta_daehwa or {"title": "대화", "location": "고양시"}
+                split = _split_daymap_by_court(
+                    new_daymap, daehwa_url_builder, base_meta.get("_court_numbers", ())
+                )
 
                 for cno, c_daymap in split.items():
                     fid = f"goyang:daehwa:{cno}"
@@ -782,8 +769,10 @@ def crawl_all() -> Tuple[Dict[str, Any], Dict[str, Dict[str, List[Any]]]]:
                 def baekseok_url_builder(slot: dict, yyyymmdd: str) -> str:
                     return "https://gbc.gys.or.kr:446/rent/tennis_rent.php?part_opt=07"
 
-                split = _split_daymap_by_court(new_daymap, baekseok_url_builder)
                 base_meta = base_meta_baekseok or {"title": "백석", "location": "고양시"}
+                split = _split_daymap_by_court(
+                    new_daymap, baekseok_url_builder, base_meta.get("_court_numbers", ())
+                )
 
                 for cno, c_daymap in split.items():
                     fid = f"goyang:baekseok:{cno}"
@@ -1675,6 +1664,9 @@ def send_push(subscription_info: dict, title: str, body: str) -> None:
 def main() -> None:
     target = (os.getenv("RUN_TARGET") or "all").strip().lower()
     print(f"[RUN] target={target}")
+    if target == "goyang" and not is_goyang_crawl_window():
+        print("[GOYANG] skipped outside KST window (05:00~22:00)")
+        return
     database_url = os.environ["DATABASE_URL"]
     _ = os.environ.get("VAPID_PUBLIC_KEY", "")
     _ = os.environ["VAPID_PRIVATE_KEY"]
@@ -1700,6 +1692,8 @@ def main() -> None:
     if protect_goyang_cache:
         reason = "partial_failure" if goyang_partial_failure else "facility_list_empty"
         print(f"[GOYANG][SAFEGUARD] {reason}; keep existing goyang cache")
+        if target == "goyang":
+            raise RuntimeError(f"Goyang crawl incomplete ({reason}); existing cache preserved")
 
     protect_suwon_cache = target in ("all", "suwon") and not any(
         str(fid).startswith("suwon:") for fid in facilities
