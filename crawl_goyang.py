@@ -582,7 +582,25 @@ def post_rent(s: requests.Session, payload: Dict[str, str], ssl_fallback_state: 
     return html, r.url, r.status_code
 
 
-def validate_gys_page(html: str, status: int, yyyymmdd: str) -> BeautifulSoup:
+def _gys_places(soup: BeautifulSoup) -> Dict[str, str]:
+    places = {}
+    for option in soup.select('select[name="place_opt"] option[value]'):
+        value = option.get("value", "").strip()
+        label = option.get_text(" ", strip=True)
+        if value.isdigit() and not re.search(r"TEST|점검", label, re.I):
+            places[value] = label
+    return places
+
+
+def _gys_selected_place(soup: BeautifulSoup) -> str:
+    for selected in soup.select('select[name="place_opt"] option[selected], input[name="place_opt"][value]'):
+        value = selected.get("value", "").strip()
+        if value:
+            return value
+    return ""
+
+
+def validate_gys_page(html: str, status: int, yyyymmdd: str, allow_selection: bool = False) -> BeautifulSoup:
     if status != 200:
         raise ValueError(f"GYS HTTP {status} date={yyyymmdd}")
     soup = BeautifulSoup(html, "lxml")
@@ -591,6 +609,8 @@ def validate_gys_page(html: str, status: int, yyyymmdd: str) -> BeautifulSoup:
         raise ValueError(f"GYS date mismatch date={yyyymmdd}")
     table = soup.find("table", attrs={"summary": re.compile("이용신청 테이블")})
     if table is None or not TIME_RE.search(table.get_text(" ", strip=True)):
+        if allow_selection and not _gys_selected_place(soup) and _gys_places(soup) and soup.find("table", summary="행사 및 대관일정표입니다."):
+            return soup
         raise ValueError(f"GYS missing timetable date={yyyymmdd}")
     return soup
 
@@ -739,7 +759,7 @@ def crawl_baekseok() -> dict:
     print(f"[BAEKSEOK] KST now={now:%Y-%m-%d %H:%M} cutoffPassed={cutoff_passed} dates={len(dates_ymd)}")
 
     facility_id = "gy-baekseok"
-    facilities = {facility_id: {"title": "백석 테니스장", "location": "고양시", "_court_numbers": []}}
+    facilities = {facility_id: {"title": "백석 테니스장", "location": "고양시", "_court_numbers": [], "_court_labels": {}}}
     availability: Dict[str, Dict[str, List[dict]]] = {facility_id: {}}
     stats = {"total": 0, "ok": 0, "empty": 0, "fail": 0, "login_required": 0}
 
@@ -804,19 +824,20 @@ def crawl_baekseok() -> dict:
                     stats["login_required"] += 1
                     raise RuntimeError(f"baekseok login required after retry. final_url={final_url}")
 
-                soup = validate_gys_page(html, resp.status_code, yyyymmdd)
-                for opt in soup.select('select[name="place_opt"] option[value], input[name="place_opt"][value]'):
-                    value = (opt.get("value") or "").strip()
+                soup = validate_gys_page(html, resp.status_code, yyyymmdd, allow_selection=not place_opt)
+                for value, label in _gys_places(soup).items():
+                    number = re.search(r"\d+\s*코트", label)
+                    facilities[facility_id]["_court_labels"].setdefault(value, re.sub(r"\s", "", number.group()) if number else label)
                     if value and value not in discovered_places:
                         discovered_places.append(value)
                         # Visit discovered courts on this date too.
                         if value not in places_for_day:
                             places_for_day.append(value)
 
-                selected = soup.select_one('select[name="place_opt"] option[selected], input[name="place_opt"][value]')
-                if selected is None:
-                    selected = soup.select_one('select[name="place_opt"] option[value]:not([value=""])')
-                selected_place = (selected.get("value") or "").strip() if selected else ""
+                selected_place = _gys_selected_place(soup)
+                if not place_opt and not selected_place and discovered_places:
+                    # This is the location picker, not a sold-out court.
+                    continue
                 actual_place = selected_place or place_opt or "1"
                 if place_opt and selected_place and selected_place != place_opt:
                     raise ValueError(f"Baekseok court mismatch requested={place_opt} received={selected_place}")

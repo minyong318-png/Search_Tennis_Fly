@@ -150,6 +150,24 @@ class GoyangValidationTests(unittest.TestCase):
              patch.object(c, '_baekseok_post', return_value=response('<h1>Unavailable</h1>', 503)):
             self.assertTrue(c.crawl_baekseok().get('partial_failure'))
 
+    def test_baekseok_selection_page_discovers_real_courts_and_excludes_test_court(self):
+        selection = '''<input name="rent_date" value="20260923">
+        <select name="place_opt"><option value="" selected>장소 선택</option>
+        <option value="6">테니스 1코트</option><option value="7">테니스 2코트</option>
+        <option value="14">(TEST) 점검코트</option></select>
+        <table summary="행사 및 대관일정표입니다."><tr><td>23</td></tr></table>'''
+        def post(_session, payload):
+            return response(selection if not payload['place_opt'] else gys_html(selected=payload['place_opt']))
+        with patch.object(c, 'build_date_range_kst', return_value=(False, ['2026-09-23'])), \
+             patch.object(c, 'login_baekseok'), patch.object(c, 'curl_requests', Mock()), \
+             patch.object(c, '_baekseok_post', side_effect=post) as requests_mock:
+            result = c.crawl_baekseok()
+        self.assertFalse(result['partial_failure'])
+        self.assertEqual(requests_mock.call_count, 3)
+        self.assertEqual(result['facilities']['gy-baekseok']['_court_numbers'], ['6', '7'])
+        self.assertEqual(result['facilities']['gy-baekseok']['_court_labels']['6'], '1코트')
+        self.assertEqual([s['courtNo'] for s in result['availability']['gy-baekseok']['2026-09-23']], ['6', '7'])
+
 
 if __name__ == '__main__':
     unittest.main()

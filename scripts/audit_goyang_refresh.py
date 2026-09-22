@@ -49,9 +49,47 @@ def response_html(response):
 def selected_place(doc):
     values = doc.xpath('//select[@name="place_opt"]/option[@selected]/@value')
     values += doc.xpath('//input[@name="place_opt" and (@type="hidden" or not(@type) or @checked)]/@value')
-    if not any(values):
-        values += doc.xpath('//select[@name="place_opt"]/option[string-length(@value)>0]/@value')[:1]
-    return next((value.strip() for value in values if value.strip()), "")
+    return next((value.strip() for value in values if value.strip().isdigit()), "")
+
+
+def usable_place_options(doc):
+    return [node for node in doc.xpath('//select[@name="place_opt"]/option')
+            if node.get("value", "").strip().isdigit()
+            and not re.search(r"TEST|점검", text(node), re.I)]
+
+
+def blank_place_discovery(doc):
+    if selected_place(doc) or not usable_place_options(doc):
+        return False
+    for select in doc.xpath('//select[@name="place_opt"]'):
+        options = select.xpath('./option[@selected]') or select.xpath('./option[1]')
+        if options and all(not node.get("value", "").strip() for node in options):
+            return True
+    return False
+
+
+def operational_snippets(doc):
+    """Capture notice text, excluding navigation, accounts and calendar events."""
+    blocked_tags = {"header", "footer", "nav", "script", "style", "noscript", "input", "textarea", "select", "option", "label", "a"}
+    blocked_area = re.compile(r"header|footer|\bnav|gnb|lnb|menu|login|member|account|personal|userinfo", re.I)
+    terms = re.compile(r"운영|대관|신청|휴|가능|불가|제한|선택|일정|예약")
+    personal = re.compile(r"이름|성명|연락처|전화|아이디|회원명|비밀번호|이메일|주소|[가-힣A-Za-z]+\s*님")
+    snippets = []
+    for node in doc.iter():
+        if not isinstance(node.tag, str):
+            continue
+        ancestors = [node, *node.iterancestors()]
+        if any(item.tag in blocked_tags or item.get("role") == "navigation"
+               or blocked_area.search(item.get("id", "") + " " + item.get("class", ""))
+               or (item.tag == "table" and "행사 및 대관일정" in item.get("summary", ""))
+               for item in ancestors):
+            continue
+        own_text = " ".join(" ".join(node.xpath('./text()')).split())
+        if terms.search(own_text) and not personal.search(own_text):
+            snippet = own_text[:120]
+            if snippet not in snippets:
+                snippets.append(snippet)
+    return snippets[:60]
 
 
 def parse_gyt(doc, group, date):
@@ -80,6 +118,12 @@ def parse_gys(doc, source, date, place):
     dates = doc.xpath('//input[@name="rent_date"]/@value')
     if not dates or re.sub(r"\D", "", dates[0]) != date.replace("-", ""):
         raise ValueError("date_mismatch")
+    if source == "baekseok" and not place and blank_place_discovery(doc):
+        return {}
+    if source == "baekseok" and place:
+        options = doc.xpath('//select[@name="place_opt"]/option[@value=$place]', place=place)
+        if any(re.search(r"TEST|점검", text(node), re.I) for node in options):
+            raise ValueError("nonpublic_court")
     tables = doc.xpath('//table[contains(@summary,"이용신청 테이블")]')
     if not tables or not TIME.search(text(tables[0])):
         raise ValueError("timetable_missing")
@@ -133,6 +177,9 @@ class Audit:
             ]
             body = text(doc)
             record["closure_phrases"] = [phrase for phrase in CLOSURE_PHRASES if phrase in body]
+            tables = doc.xpath('//table[contains(@summary,"이용신청 테이블")]')
+            if source != "gytennis" and (not tables or not TIME.search(text(tables[0]))):
+                record["operational_text"] = operational_snippets(doc)
             if status != 200:
                 raise ValueError("http_status")
             units = parse_gyt(doc, group, date) if source == "gytennis" else parse_gys(doc, source, date, place)

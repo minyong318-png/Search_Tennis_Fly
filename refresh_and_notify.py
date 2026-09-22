@@ -776,7 +776,8 @@ def crawl_all() -> Tuple[Dict[str, Any], Dict[str, Dict[str, List[Any]]]]:
 
                 for cno, c_daymap in split.items():
                     fid = f"goyang:baekseok:{cno}"
-                    facilities[fid] = _goyang_split_title(base_meta, f"{cno}코트")
+                    label = (base_meta.get("_court_labels") or {}).get(cno, f"{cno}코트")
+                    facilities[fid] = _goyang_split_title(base_meta, label)
                     availability[fid] = c_daymap
 
                 continue
