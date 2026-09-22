@@ -74,8 +74,10 @@ class GoyangSourceAuditTests(unittest.TestCase):
 
     def test_test_maintenance_court_cannot_be_published(self):
         doc = html.fromstring(source_page(place="14").replace('>테니스1</option>', '>(TEST)점검코트</option>'))
-        with self.assertRaises(ValueError):
-            audit.parse_gys(doc, "baekseok", "2026-09-24", "14")
+        for request in ("14", ""):
+            with self.subTest(request=request):
+                with self.assertRaises(ValueError):
+                    audit.parse_gys(doc, "baekseok", "2026-09-24", request)
 
 
 if __name__ == "__main__":

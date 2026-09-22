@@ -120,8 +120,9 @@ def parse_gys(doc, source, date, place):
         raise ValueError("date_mismatch")
     if source == "baekseok" and not place and blank_place_discovery(doc):
         return {}
-    if source == "baekseok" and place:
-        options = doc.xpath('//select[@name="place_opt"]/option[@value=$place]', place=place)
+    inspected_place = place or selected_place(doc)
+    if source == "baekseok" and inspected_place:
+        options = doc.xpath('//select[@name="place_opt"]/option[@value=$place]', place=inspected_place)
         if any(re.search(r"TEST|점검", text(node), re.I) for node in options):
             raise ValueError("nonpublic_court")
     selected = selected_place(doc)

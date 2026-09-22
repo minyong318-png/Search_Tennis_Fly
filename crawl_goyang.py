@@ -846,6 +846,8 @@ def crawl_baekseok() -> dict:
                             places_for_day.append(value)
 
                 selected_place = _gys_selected_place(soup)
+                if selected_place and _gys_places(soup) and selected_place not in _gys_places(soup):
+                    raise ValueError(f"Baekseok selected a nonpublic court: {selected_place}")
                 if not place_opt and not selected_place and discovered_places:
                     # This is the location picker, not a sold-out court.
                     continue

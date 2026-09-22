@@ -184,6 +184,15 @@ class GoyangValidationTests(unittest.TestCase):
         c.validate_gys_page(html, 200, '20260923')
         self.assertEqual(c.parse_slots_daehwa(html)[0]['slotKey'], '08:00~10:00')
 
+    def test_baekseok_does_not_accept_a_default_test_court(self):
+        html = gys_html().replace('<option value="6" selected>6 코트</option>', '<option value="14" selected>(TEST) 점검코트</option>')
+        with patch.object(c, 'build_date_range_kst', return_value=(False, ['2026-09-23'])), \
+             patch.object(c, 'login_baekseok'), patch.object(c, 'curl_requests', Mock()), \
+             patch.object(c, '_baekseok_post', return_value=response(html)):
+            result = c.crawl_baekseok()
+        self.assertTrue(result['partial_failure'])
+        self.assertNotIn('14', result['facilities']['gy-baekseok']['_court_numbers'])
+
 
 if __name__ == '__main__':
     unittest.main()
