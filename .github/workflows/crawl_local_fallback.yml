@@ -55,6 +55,15 @@ jobs:
             npx playwright install chromium
           }
 
+      - name: Verify Goyang closure and cache safeguards
+        if: ${{ inputs.target == 'goyang' }}
+        shell: powershell
+        run: |
+          $python = "$env:LOCALAPPDATA\Programs\Python\Python311\python.exe"
+          if (-not (Test-Path $python)) { $python = "python" }
+          & $python -B -m unittest discover -s tests -p "test_goyang*.py"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Refresh Korean gov SSL pins
         shell: powershell
         continue-on-error: true

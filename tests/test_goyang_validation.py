@@ -190,8 +190,11 @@ class GoyangValidationTests(unittest.TestCase):
         <option value="14">(TEST)점검코트</option></select>
         <table summary="행사 및 대관일정표입니다."></table>
         <p>선택하신 날짜는 서구청장기 대회 입니다.</p>'''
-        c.validate_gys_page(html, 200, '20261024')
-        self.assertEqual([], c.parse_slots_daehwa(html))
+        for name in ('서구청장기 대회', '고양시장배 대회', '전국동호인\n대회'):
+            with self.subTest(competition=name):
+                page = html.replace('서구청장기 대회', name)
+                c.validate_gys_page(page, 200, '20261024')
+                self.assertEqual([], c.parse_slots_daehwa(page))
         for invalid, status in (
             (html, 503),
             (html.replace('20261024', '20261023'), 200),

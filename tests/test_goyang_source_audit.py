@@ -36,9 +36,11 @@ class GoyangSourceAuditTests(unittest.TestCase):
         page = source_page(notice="선택하신 날짜는 서구청장기 대회 입니다.", timetable=False)
         page = page.replace('20260924', '20261024')
 
-        result = audit.parse_gys(html.fromstring(page), "daehwa", "2026-10-24", "2")
-
-        self.assertEqual({("goyang:daehwa:1", "2026-10-24"): Counter()}, result)
+        for name in ('서구청장기 대회', '고양시장배 대회', '전국동호인\n대회'):
+            with self.subTest(competition=name):
+                variant = page.replace('서구청장기 대회', name)
+                result = audit.parse_gys(html.fromstring(variant), "daehwa", "2026-10-24", "2")
+                self.assertEqual({("goyang:daehwa:1", "2026-10-24"): Counter()}, result)
         for invalid in (
             page.replace('value="20261024"', 'value="20261023"'),
             page.replace('summary="행사 및 대관일정표입니다."', 'summary="unrelated"'),
