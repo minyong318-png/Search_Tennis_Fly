@@ -32,6 +32,23 @@ class GoyangSourceAuditTests(unittest.TestCase):
 
         self.assertEqual({("goyang:daehwa:1", "2026-09-24"): Counter()}, result)
 
+    def test_actual_competition_notice_is_verified_empty(self):
+        page = source_page(notice="선택하신 날짜는 서구청장기 대회 입니다.", timetable=False)
+        page = page.replace('20260924', '20261024')
+
+        result = audit.parse_gys(html.fromstring(page), "daehwa", "2026-10-24", "2")
+
+        self.assertEqual({("goyang:daehwa:1", "2026-10-24"): Counter()}, result)
+        for invalid in (
+            page.replace('value="20261024"', 'value="20261023"'),
+            page.replace('summary="행사 및 대관일정표입니다."', 'summary="unrelated"'),
+            page.replace('value="2" selected', 'value="2"'),
+            page.replace('서구청장기 대회', '서버 오류'),
+            page.replace('선택하신 날짜는 서구청장기 대회 입니다.', '대회 일정을 확인하세요.'),
+        ):
+            with self.subTest(page=invalid), self.assertRaises(ValueError):
+                audit.parse_gys(html.fromstring(invalid), "daehwa", "2026-10-24", "2")
+
     def test_holiday_notice_requires_calendar_selected_court_and_matching_date(self):
         page = source_page(notice="선택하신 날짜는 추석연휴 입니다.", timetable=False)
         variants = [

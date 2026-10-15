@@ -617,7 +617,7 @@ def validate_gys_page(html: str, status: int, yyyymmdd: str, allow_selection: bo
             if allow_selection and not selected and _gys_places(soup):
                 return soup
             closed_notice = re.search(
-                r"선택하신\s*날짜는\s*[^.!?]{0,30}(?:연휴|휴관일|휴장일|휴무일)\s*입니다",
+                r"선택하신\s*날짜는\s*[^.!?]{0,30}(?:연휴|휴관일|휴장일|휴무일|대회)\s*입니다",
                 soup.get_text(" ", strip=True),
             )
             if selected in _gys_places(soup) and closed_notice:

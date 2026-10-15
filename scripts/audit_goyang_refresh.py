@@ -139,7 +139,7 @@ def parse_gys(doc, source, date, place):
     tables = doc.xpath('//table[@summary="이용신청 테이블" or @summary="대관신청 테이블"]')
     if not tables or not TIME.search(text(tables[0])):
         calendar = doc.xpath('//table[@summary="행사 및 대관일정표입니다."]')
-        notice = re.compile(r"선택하신\s*날짜는\s*[^.!?]{0,30}(?:연휴|휴관일|휴장일|휴무일)\s*입니다")
+        notice = re.compile(r"선택하신\s*날짜는\s*[^.!?]{0,30}(?:연휴|휴관일|휴장일|휴무일|대회)\s*입니다")
         if selected.isdigit() and calendar and any(notice.search(snippet) for snippet in operational_snippets(doc)):
             return {(f"goyang:{source}:{court}", date): Counter()}
         raise ValueError("timetable_missing")

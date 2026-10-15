@@ -184,6 +184,46 @@ class GoyangValidationTests(unittest.TestCase):
         c.validate_gys_page(html, 200, '20260923')
         self.assertEqual(c.parse_slots_daehwa(html)[0]['slotKey'], '08:00~10:00')
 
+    def test_competition_closure_is_verified_empty_with_page_identity_checks(self):
+        html = '''<input name="rent_date" value="20261024">
+        <select name="place_opt"><option value="2" selected>테니스 1코트</option>
+        <option value="14">(TEST)점검코트</option></select>
+        <table summary="행사 및 대관일정표입니다."></table>
+        <p>선택하신 날짜는 서구청장기 대회 입니다.</p>'''
+        c.validate_gys_page(html, 200, '20261024')
+        self.assertEqual([], c.parse_slots_daehwa(html))
+        for invalid, status in (
+            (html, 503),
+            (html.replace('20261024', '20261023'), 200),
+            (html.replace('행사 및 대관일정표입니다.', 'unrelated'), 200),
+            (html.replace('value="2" selected', 'value="2"'), 200),
+            (html.replace('value="2" selected>테니스 1코트', 'value="14" selected>(TEST)점검코트'), 200),
+            (html.replace('선택하신 날짜는 서구청장기 대회 입니다.', '대회 일정을 확인하세요.'), 200),
+            (html.replace('서구청장기 대회', '서버 오류'), 200),
+        ):
+            with self.subTest(html=invalid, status=status), self.assertRaises(ValueError):
+                c.validate_gys_page(invalid, status, '20261024')
+
+    def test_daehwa_continues_collecting_after_verified_competition_closure(self):
+        def post(_session, payload, _state):
+            if payload['rent_date'] == '20261024':
+                html = f'''<input name="rent_date" value="20261024">
+                <select name="place_opt"><option value="{payload['place_opt']}" selected>테니스</option></select>
+                <table summary="행사 및 대관일정표입니다."></table>
+                <p>선택하신 날짜는 서구청장기 대회 입니다.</p>'''
+            else:
+                html = gys_html(payload['rent_date'], selected=payload['place_opt'])
+            return html, c.DAEHWA_RENT, 200
+
+        with patch.object(c, 'build_date_range_kst', return_value=(False, ['2026-10-24', '2026-10-25'])), \
+             patch.object(c, 'login_daehwa'), patch.object(c, 'post_rent', side_effect=post) as post_mock:
+            result = c.crawl_daehwa()
+
+        self.assertFalse(result['partial_failure'])
+        self.assertEqual(8, post_mock.call_count)
+        self.assertEqual([], result['availability']['gy-daehwa']['2026-10-24'])
+        self.assertEqual(['1', '2', '3', '4'], [slot['courtNo'] for slot in result['availability']['gy-daehwa']['2026-10-25']])
+
     def test_baekseok_does_not_accept_a_default_test_court(self):
         html = gys_html().replace('<option value="6" selected>6 코트</option>', '<option value="14" selected>(TEST) 점검코트</option>')
         with patch.object(c, 'build_date_range_kst', return_value=(False, ['2026-09-23'])), \
