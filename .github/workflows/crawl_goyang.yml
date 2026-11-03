@@ -60,6 +60,7 @@ jobs:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           RUN_TARGET: "goyang"
           PYTHONUNBUFFERED: "1"
+          CRAWL_DIAGNOSTICS_PATH: "debug/gytennis/crawler-diagnostics.jsonl"
           GOYANG_AUDIT: ${{ inputs.audit }}
           FORCE_GOYANG_CRAWL: ${{ inputs.force }}
           GYT_USE_CURL_CFFI: "1"

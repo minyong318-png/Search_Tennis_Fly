@@ -25,6 +25,17 @@ def source_page(place="2", summary="이용신청 테이블", notice="", timetabl
 
 
 class GoyangSourceAuditTests(unittest.TestCase):
+    def test_actual_tree_pruning_notice_is_verified_empty(self):
+        for notice in ('수목 가지치기 작업', '수목\n가지치기  작업'):
+            page = source_page(notice=f'선택하신 날짜는 {notice} 입니다.', timetable=False).replace('20260924', '20261105')
+            with self.subTest(notice=notice):
+                result = audit.parse_gys(html.fromstring(page), 'daehwa', '2026-11-05', '2')
+                self.assertEqual({('goyang:daehwa:1', '2026-11-05'): Counter()}, result)
+        for notice in ('서버 복구 작업', '예약정보 수집 작업'):
+            page = source_page(notice=f'선택하신 날짜는 {notice} 입니다.', timetable=False).replace('20260924', '20261105')
+            with self.subTest(notice=notice), self.assertRaises(ValueError):
+                audit.parse_gys(html.fromstring(page), 'daehwa', '2026-11-05', '2')
+
     def test_actual_chuseok_notice_is_verified_empty(self):
         doc = html.fromstring(source_page(notice="선택하신 날짜는 추석연휴 입니다.", timetable=False))
 

@@ -34,6 +34,32 @@ def gys_html(date='20260923', selected='6', available=True):
 
 
 class GoyangValidationTests(unittest.TestCase):
+    def test_tree_pruning_closure_keeps_later_dates_and_rejects_unrelated_work(self):
+        def closed_page(place='2', notice='수목 가지치기 작업'):
+            return f'''<input name="rent_date" value="20261105">
+            <select name="place_opt"><option value="{place}" selected>테니스</option></select>
+            <table summary="행사 및 대관일정표입니다."></table>
+            <p>선택하신 날짜는 {notice} 입니다.</p>'''
+
+        for notice in ('수목 가지치기 작업', '수목\n가지치기  작업'):
+            with self.subTest(notice=notice):
+                c.validate_gys_page(closed_page(notice=notice), 200, '20261105')
+                self.assertEqual([], c.parse_slots_daehwa(closed_page(notice=notice)))
+        for notice in ('서버 복구 작업', '예약정보 수집 작업'):
+            with self.subTest(notice=notice), self.assertRaises(ValueError):
+                c.validate_gys_page(closed_page(notice=notice), 200, '20261105')
+
+        def post(_session, payload, _state):
+            html = closed_page(payload['place_opt']) if payload['rent_date'] == '20261105' else gys_html(payload['rent_date'])
+            return html, c.DAEHWA_RENT, 200
+        with patch.object(c, 'build_date_range_kst', return_value=(False, ['2026-11-05', '2026-11-06'])), \
+             patch.object(c, 'login_daehwa'), patch.object(c, 'post_rent', side_effect=post) as post_mock:
+            result = c.crawl_daehwa()
+        self.assertFalse(result['partial_failure'])
+        self.assertEqual(8, post_mock.call_count)
+        self.assertEqual([], result['availability']['gy-daehwa']['2026-11-05'])
+        self.assertEqual(4, len(result['availability']['gy-daehwa']['2026-11-06']))
+
     def fetch(self, reply):
         session = Mock()
         session.get.return_value = reply

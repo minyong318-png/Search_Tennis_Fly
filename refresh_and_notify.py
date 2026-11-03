@@ -650,11 +650,18 @@ def crawl_all() -> Tuple[Dict[str, Any], Dict[str, Dict[str, List[Any]]]]:
             **out_g2.get("availability", {}),
             **out_g3.get("availability", {}),
         }
-        crawl_goyang.LAST_PARTIAL_FAILURE = any(
-            bool(out.get("partial_failure"))
+        failed_goyang_sources = {
+            prefix
+            for prefix, out in (
+                ("goyang:gytennis:", out_g1),
+                ("goyang:daehwa:", out_g2),
+                ("goyang:baekseok:", out_g3),
+            )
+            if bool(out.get("partial_failure"))
             or (out.get("diagnostic") or {}).get("status") not in {"normal", "no_reservations"}
-            for out in (out_g1, out_g2, out_g3)
-        )
+        }
+        LAST_FAILED_PREFIXES.update(failed_goyang_sources)
+        crawl_goyang.LAST_PARTIAL_FAILURE = bool(failed_goyang_sources)
 
         # -------------------------------------------------
         # 고양 base meta 확보 (코트별 분리 시 title 생성용)
@@ -1257,12 +1264,16 @@ def clear_availability_cache_for_target(
         excluded_ids = tuple(str(fid) for fid in exclude_facility_ids if fid)
         if excluded_ids:
             extra_guard += " and not (facility_id = any(%s))"
+        if excluded:
+            # Child sources must be protected even when the target is goyang:%.
+            extra_guard += " and not (" + " OR ".join("facility_id like %s" for _ in excluded) + ")"
         params = [d1, d2, *prefixes]
         if keep_yongin_today:
             params.append("yongin:%")
             params.append(today_d)
         if excluded_ids:
             params.append(list(excluded_ids))
+        params.extend(prefix + "%" for prefix in excluded)
         cur.execute(
             f"""
             update public.availability_cache
@@ -1276,6 +1287,21 @@ def clear_availability_cache_for_target(
         )
     if commit:
         conn.commit()
+
+def mark_failed_goyang_sources(conn: psycopg.Connection, prefixes: Iterable[str]) -> None:
+    """Join the cache transaction without refreshing or erasing failed slots."""
+    failed = sorted(set(prefixes) & {"goyang:gytennis:", "goyang:daehwa:", "goyang:baekseok:"})
+    if not failed:
+        return
+    with conn.cursor() as cur:
+        where = " OR ".join("facility_id like %s" for _ in failed)
+        cur.execute(
+            f"""update public.availability_cache
+                   set query_status='failed', availability_status='unknown', updated_at=now()
+                 where date_ymd >= %s and ({where})""",
+            (yyyymmdd_to_date(kst_today_yyyymmdd()), *(prefix + "%" for prefix in failed)),
+        )
+
 
 def upsert_availability_cache_for_frontend(
     conn: psycopg.Connection,
@@ -1686,9 +1712,15 @@ def main() -> None:
     # ✅ 이번 실행 타겟/기간에 해당하는 캐시를 먼저 비워두고(빈 배열),
     #    아래 upsert에서 다시 채운다.
     goyang_partial_failure = bool(getattr(crawl_goyang, "LAST_PARTIAL_FAILURE", False))
+    goyang_failed_prefixes = tuple(prefix for prefix in LAST_FAILED_PREFIXES if prefix.startswith("goyang:"))
+    healthy_goyang_facilities = any(
+        str(fid).startswith("goyang:")
+        and not str(fid).startswith(goyang_failed_prefixes)
+        for fid in facilities
+    )
     protect_goyang_cache = target in ("all", "goyang") and (
-        goyang_partial_failure
-        or not any(str(fid).startswith("goyang:") for fid in facilities)
+        not healthy_goyang_facilities
+        or (goyang_partial_failure and not goyang_failed_prefixes)
     )
     if protect_goyang_cache:
         reason = "partial_failure" if goyang_partial_failure else "facility_list_empty"
@@ -1792,7 +1824,7 @@ def main() -> None:
         if deleted_alarms:
             print(f"[ALARMS] expired deleted={deleted_alarms} (KST<{kst_today_yyyymmdd()})")
 
-        mm = compute_minmax_yyyymmdd(availability)
+        mm = compute_minmax_yyyymmdd(availability_for_write)
         if mm:
             start_ymd, end_ymd = mm
             print(f"[CACHE] clear target={clear_target or '(skip)'} range={start_ymd}~{end_ymd}")
@@ -1832,6 +1864,8 @@ def main() -> None:
                 keep_yongin_today=False,
                 commit=False,
             )
+            if goyang_failed_prefixes:
+                mark_failed_goyang_sources(conn, goyang_failed_prefixes)
             conn.commit()
             cache_rows = sum(len(day_map or {}) for day_map in availability_for_write.values())
             cache_slots = sum(
@@ -1851,6 +1885,11 @@ def main() -> None:
         if not cache_write_ok:
             print("[SUMMARY] alarms=0 (frontend cache write failed)")
             return
+
+        if target == "goyang" and goyang_partial_failure:
+            # Persist verified sibling sources, but keep the run red and avoid
+            # sending alarms from an incomplete regional observation.
+            raise RuntimeError("Goyang crawl incomplete; healthy sources saved, failed sources preserved")
 
         # 3) alarms preload
         alarms = load_alarms(conn)
